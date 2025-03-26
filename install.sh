@@ -49,3 +49,7 @@ git clone https://github.com/julien6/overcooked_ai.git
 cd overcooked_ai
 pip install -e .
 cd ..
+
+cd mamad/
+
+pip install -r requirements.txt
