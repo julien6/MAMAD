@@ -172,3 +172,5 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+mamad/modeling/frame_modeling/_trajectories.json
+mamad/modeling/frame_modeling/trajectories.json

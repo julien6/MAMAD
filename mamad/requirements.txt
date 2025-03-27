@@ -2,3 +2,6 @@ torch
 pillow
 torchvision
 matplotlib
+tensorflow
+pettingzoo
+scikit-image
