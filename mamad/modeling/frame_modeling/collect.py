@@ -81,6 +81,10 @@ def collect_trajectories(env, action_sampler: ActionSampler = None, num_episodes
     if os.path.exists(file_path):
         os.remove(file_path)
 
+    # Create the file
+    f = open(file_path, 'w+')
+    f.close()
+
     with open(file_path, 'a') as f:
         f.write('{\n')  # Début du fichier JSON (liste de trajectoires)
         for episode in tqdm(range(num_episodes)):
@@ -190,9 +194,9 @@ if __name__ == '__main__':
               'featurize_fn': core_env.featurize_state_mdp}
     env = gym.make('Overcooked-v0', **config)
 
-    # output_file_path = collect_trajectories(
-    #     env, num_episodes=1, max_steps=3, action_sampler=OvercookedActionSampler())
+    output_file_path = collect_trajectories(
+        env, num_episodes=1, max_steps=3, action_sampler=OvercookedActionSampler())
 
-    output_file_path = "trajectories.json"
+    # output_file_path = "trajectories.json"
 
     print(load_episode_step_data(output_file_path, 0, 0)["actions"])
