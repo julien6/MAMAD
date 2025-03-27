@@ -166,8 +166,8 @@ def load_episode_step_data(file_path: str, episode_idx: int, step_idx: int):
         step_data = step_data[:-2]
     if step_data[-5:] == "]}},\n":
         step_data = step_data[:-2]
-
-    print(step_data)
+    if step_data[-2:] == ",\n":
+        step_data = step_data[:-2]
 
     step_data = json.loads(step_data)
     return step_data
@@ -191,8 +191,8 @@ if __name__ == '__main__':
     env = gym.make('Overcooked-v0', **config)
 
     # output_file_path = collect_trajectories(
-    #     env, num_episodes=1, max_steps=30, action_sampler=OvercookedActionSampler())
+    #     env, num_episodes=1, max_steps=3, action_sampler=OvercookedActionSampler())
 
     output_file_path = "trajectories.json"
 
-    print(load_episode_step_data(output_file_path, 0, 0))
+    print(load_episode_step_data(output_file_path, 0, 0)["actions"])
