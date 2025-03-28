@@ -174,3 +174,11 @@ cython_debug/
 .pypirc
 mamad/modeling/frame_modeling/_trajectories.json
 mamad/modeling/frame_modeling/trajectories.json
+mamad/modeling/frame_modeling/latent_trajectories.json
+mamad/modeling/frame_modeling/autoencoder_stats.json
+mamad/modeling/frame_modeling/autoencoder_validation_stats.json
+mamad/modeling/frame_modeling/predictive_mlp.pth
+mamad/modeling/frame_modeling/autoencoder_model.pth
+mamad/modeling/frame_modeling/true_frame.png
+mamad/modeling/frame_modeling/true_next_frame.png
+mamad/modeling/frame_modeling/predicted_next_frame.png

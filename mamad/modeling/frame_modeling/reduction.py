@@ -1,10 +1,11 @@
+from typing import Union
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import json
 import numpy as np
 import pickle
-import matplotlib as plt
+import matplotlib.pyplot as plt
 import random
 import os
 
@@ -180,17 +181,26 @@ def plot_reconstruction_error_histogram(original: torch.Tensor, reconstructed: t
     plt.show()
 
 
-def save_random_observation_and_reconstruction(autoencoder, file_path: str, episode_idx: int, step_idx: int, original_output_path: str, reconstructed_output_path: str):
+def get_frame_shape(trajectory_file_path: str) -> np.shape:
+    step_data = load_episode_step_data(trajectory_file_path, 0, 0)
+    if step_data is None:
+        print(
+            f"Les données pour l'épisode {0} et le pas {0} n'ont pas pu être chargées.")
+        return
+    return np.array(step_data["frame"]).shape
+
+
+def save_frame_and_reconstruct(autoencoder, file_path: str, episode_idx: int, step_idx: int, original_output_path: str, reconstructed_output_path: str):
     """
-    Sélectionne une observation aléatoire, la passe dans l'autoencodeur et sauvegarde l'observation originale
+    Sélectionne une frame, la passe dans l'autoencodeur et sauvegarde la frame originale
     et la reconstruction en PNG.
 
     Parameters:
         autoencoder (torch.nn.Module): Le modèle d'autoencodeur entraîné.
         file_path (str): Chemin du fichier JSON contenant les trajectoires.
         episode_idx (int): L'indice de l'épisode à charger.
-        step_idx (int): Le numéro du pas de l'épisode pour lequel les observations seront utilisées.
-        original_output_path (str): Chemin pour sauvegarder l'observation originale en PNG.
+        step_idx (int): Le numéro du pas de l'épisode pour lequel les frames seront utilisées.
+        original_output_path (str): Chemin pour sauvegarder la frame originale en PNG.
         reconstructed_output_path (str): Chemin pour sauvegarder la reconstruction en PNG.
     """
     # Charger les données de l'épisode et du step
@@ -200,31 +210,27 @@ def save_random_observation_and_reconstruction(autoencoder, file_path: str, epis
             f"Les données pour l'épisode {episode_idx} et le pas {step_idx} n'ont pas pu être chargées.")
         return
 
-    # Concaténer toutes les observations et choisir une au hasard
-    observations = np.concatenate(
-        [np.array(obs) for obs in step_data["observations"].values()]) / 255
-    # Reshape en (nombre_observations, 457*120*3)
-    observations = observations.reshape(-1, 457 * 120 * 3)
-    random_idx = random.randint(0, observations.shape[0] - 1)
-    random_observation = observations[random_idx]
+    frame_shape = get_frame_shape(trajectory_file)
 
-    # Reshape pour obtenir l'image originale (457, 120, 3)
-    original_image = random_observation.reshape(457, 120, 3)
+    # Concaténer toutes les frames et choisir une au hasard
+    original_image = np.array(step_data["frame"]) / 255
+    # Flatten the original rendered image
+    processed_frame = original_image.reshape(-1, np.prod(frame_shape))
 
-    # Sauvegarder l'observation originale en PNG
+    # Sauvegarder la frame originale en PNG
     # Convertir en 0-255 si nécessaire
     original_img = Image.fromarray((original_image * 255).astype(np.uint8))
     original_img.save(original_output_path)
-    print(f"Observation originale sauvegardée sous {original_output_path}")
+    print(f"Frame originale sauvegardée sous {original_output_path}")
 
-    # Passer l'observation dans l'autoencodeur pour obtenir la reconstruction
+    # Passer la frame dans l'autoencodeur pour obtenir la reconstruction
     autoencoder.eval()  # S'assurer que le modèle est en mode évaluation
     with torch.no_grad():
-        input_tensor = torch.tensor(random_observation, dtype=torch.float32).unsqueeze(
+        input_tensor = torch.tensor(processed_frame, dtype=torch.float32).unsqueeze(
             0)  # Ajouter la dimension batch
         reconstructed_tensor = autoencoder(input_tensor).squeeze(
             0)  # Supprimer la dimension batch
-        reconstructed_image = reconstructed_tensor.numpy().reshape(457, 120, 3)
+        reconstructed_image = reconstructed_tensor.numpy().reshape(frame_shape)
 
     # Sauvegarder la reconstruction en PNG
     reconstructed_img = Image.fromarray(
@@ -233,7 +239,26 @@ def save_random_observation_and_reconstruction(autoencoder, file_path: str, epis
     print(f"Image reconstruite sauvegardée sous {reconstructed_output_path}")
 
 
-def validate_autoencoder(autoencoder, file_path: str, num_episodes: int, max_steps: int):
+def load_autoencoder(model_path: str, trajectory_file_path: str):
+
+    # Get the shape of the frame (height, width, channels)
+    frame_shape = get_frame_shape(trajectory_file_path)
+
+    # Initialiser l'autoencodeur avec les mêmes dimensions
+    autoencoder = Autoencoder(frame_shape)
+
+    # Charger les poids sauvegardés dans le modèle
+    autoencoder.load_state_dict(torch.load(model_path))
+    autoencoder.eval()  # Mettre le modèle en mode évaluation
+    print(f"Autoencodeur chargé avec succès depuis {model_path}")
+    return autoencoder
+
+
+def validate_autoencoder(autoencoder: Union[Autoencoder, str], file_path: str, num_episodes: int, max_steps: int):
+
+    if isinstance(autoencoder, str):
+        autoencoder = load_autoencoder(autoencoder, file_path)
+
     autoencoder.eval()
     psnr_list, ssim_list, ve_list, cosine_sim_list = [], [], [], []
 
@@ -246,9 +271,12 @@ def validate_autoencoder(autoencoder, file_path: str, num_episodes: int, max_ste
                 continue
 
             # Normalize and flatten the observations (frames)
-            observations = np.concatenate(
-                [np.array(obs) / 255 for obs in step_data["frame"].values()])  # Assuming 'frame' is available
-            observations = observations.reshape(-1, 457 * 120 * 3)
+            observations = np.array(step_data["frame"]) / 255
+
+            observations_shape = observations.shape
+
+            observations = observations.reshape(-1,
+                                                np.prod(observations_shape))
             observations = torch.tensor(observations, dtype=torch.float32)
 
             # Reconstruct the frames using the autoencoder
@@ -256,20 +284,19 @@ def validate_autoencoder(autoencoder, file_path: str, num_episodes: int, max_ste
                 reconstructed = autoencoder(observations)
 
             # Calculate metrics for each observation
-            for i in range(observations.size(0)):
-                original_frame = observations[i].reshape(457, 120, 3).numpy()
-                reconstructed_frame = reconstructed[i].reshape(
-                    457, 120, 3).numpy()
+            original_frame = observations.reshape(observations_shape).numpy()
+            reconstructed_frame = reconstructed.reshape(
+                observations_shape).numpy()
 
-                # PSNR, SSIM, Variance Explained, and Cosine Similarity
-                psnr_list.append(calculate_psnr(
-                    observations[i], reconstructed[i]))
-                ssim_list.append(calculate_ssim(
-                    original_frame, reconstructed_frame))
-                ve_list.append(calculate_variance_explained(
-                    observations[i], reconstructed[i]))
-                cosine_sim_list.append(calculate_cosine_similarity(
-                    observations[i], reconstructed[i]))
+            # PSNR, SSIM, Variance Explained, and Cosine Similarity
+            psnr_list.append(calculate_psnr(
+                observations, reconstructed))
+            ssim_list.append(calculate_ssim(
+                original_frame, reconstructed_frame))
+            ve_list.append(calculate_variance_explained(
+                observations, reconstructed))
+            cosine_sim_list.append(calculate_cosine_similarity(
+                observations, reconstructed))
 
     # Compute the average of each metric
     stats = {
@@ -282,51 +309,53 @@ def validate_autoencoder(autoencoder, file_path: str, num_episodes: int, max_ste
     # Print the validation statistics
     print("Validation Metrics:", stats)
 
-    # Optionally, you can plot some additional metrics like histograms of reconstruction errors
-    plot_reconstruction_error_histogram(observations, reconstructed)
+    # # Optionally, you can plot some additional metrics like histograms of reconstruction errors
+    # plot_reconstruction_error_histogram(observations, reconstructed)
 
     return stats
 
 
-def convert_to_latent_trajectories(autoencoder: torch.nn.Module, input_file: str, output_file: str = "latent_trajectories.json"):
+def convert_to_latent_trajectories(autoencoder: torch.nn.Module, input_file: str, num_episodes: int, max_steps: int, output_file: str = "latent_trajectories.json"):
     autoencoder.eval()
     if os.path.exists(output_file):
         os.remove(output_file)
 
     with open(output_file, 'a') as f_out:
-        f_out.write("{\n")
-        with open(input_file, 'r') as f_in:
-            trajectories = json.load(f_in)
-            first_episode = True
-            for episode_key, steps in trajectories.items():
-                if not first_episode:
-                    f_out.write(",\n")
-                first_episode = False
-                f_out.write(f'"{episode_key}": {{\n')
+        f_out.write("{")
 
-                first_step = True
-                for step_key, data in steps.items():
-                    if not first_step:
-                        f_out.write(",\n")
-                    first_step = False
+        for episode_idx in tqdm(range(num_episodes)):
 
-                    # Convert frame to latent vector
-                    frame = np.array(data["frame"]) / 255.0
-                    frame_tensor = torch.tensor(
-                        frame.reshape(1, -1), dtype=torch.float32)
-                    with torch.no_grad():
-                        latent_vector = autoencoder.encoder(
-                            frame_tensor).squeeze(0).numpy().tolist()
+            f_out.write(f'\n"episode_{episode_idx}": {{')
 
-                    # Build new step with latent representation
-                    latent_step = {
-                        "latent_frame": latent_vector,
-                        "actions": data["actions"]
-                    }
+            for step_idx in tqdm(range(max_steps), desc=f"Episode {episode_idx} Steps"):
+                # Load the current episode's step data
+                step_data = load_episode_step_data(
+                    input_file, episode_idx, step_idx)
+                if step_data is None:
+                    continue  # Skip if step data is unavailable
 
-                    f_out.write(f'"{step_key}": {json.dumps(latent_step)}')
+                # Convert frame to latent vector
+                frame = np.array(step_data["frame"]) / 255.0
+                frame_tensor = torch.tensor(
+                    frame.reshape(1, -1), dtype=torch.float32)
+                with torch.no_grad():
+                    latent_vector = autoencoder.encoder(
+                        frame_tensor).squeeze(0).numpy().tolist()
 
-                f_out.write("\n}")
+                # Build new step with latent representation
+                latent_step = {
+                    "latent_frame": latent_vector,
+                    "actions": step_data["actions"]
+                }
+
+                f_out.write(f'\n"step_{step_idx}": {json.dumps(latent_step)}')
+
+                if step_idx < max_steps - 1:
+                    f_out.write(",")
+
+            f_out.write("}")
+            if episode_idx < num_episodes - 1:
+                f_out.write(",")
         f_out.write("\n}")
     print(f"Latent trajectories saved to {output_file}")
     return output_file
@@ -337,35 +366,40 @@ if __name__ == "__main__":
     # Path to the collected trajectory file (frames + actions)
     trajectory_file = "trajectories.json"
 
-    # Step 1: Train the autoencoder
-    print("Training autoencoder on collected frame trajectories...")
-    autoencoder, training_stats = train_autoencoder(
-        file_path=trajectory_file,
-        num_episodes=5,     # Adjust this number depending on your dataset
-        max_steps=100,
-        epochs=10,
-        batch_size=32,
-        learning_rate=1e-3
-    )
+    # # Step 1: Train the autoencoder
+    # print("Training autoencoder on collected frame trajectories...")
+    # autoencoder, training_stats = train_autoencoder(
+    #     file_path=trajectory_file,
+    #     num_episodes=5,     # Adjust this number depending on your dataset
+    #     max_steps=100,
+    #     epochs=10,
+    #     batch_size=32,
+    #     learning_rate=1e-3
+    # )
 
-    # Step 2: Validate the autoencoder on the same data
-    print("\nValidating the trained autoencoder...")
-    validation_stats = validate_autoencoder(
-        autoencoder,
-        file_path=trajectory_file,
-        num_episodes=5,
-        max_steps=100
-    )
+    autoencoder = load_autoencoder("autoencoder_model.pth", trajectory_file)
 
-    # Save validation stats
-    with open("autoencoder_validation_stats.json", "w") as f:
-        json.dump(validation_stats, f, indent=4)
+    # # Step 2: Validate the autoencoder on the same data
+    # print("\nValidating the trained autoencoder...")
+    # validation_stats = validate_autoencoder(
+    #     autoencoder,
+    #     file_path=trajectory_file,
+    #     num_episodes=5,
+    #     max_steps=100
+    # )
 
-    # Step 3: Convert full trajectories (frames → latent vectors)
-    print("\nConverting trajectories to latent representation...")
-    latent_output_file = "latent_trajectories.json"
+    # # Save validation stats
+    # with open("autoencoder_validation_stats.json", "w") as f:
+    #     json.dump(validation_stats, f, indent=4)
 
-    convert_to_latent_trajectories(
-        autoencoder, trajectory_file, latent_output_file)
+    # # Step 3: Convert full trajectories (frames → latent vectors)
+    # print("\nConverting trajectories to latent representation...")
+    # latent_output_file = "latent_trajectories.json"
 
-    print("\n✅ Full pipeline complete: training, validation, and conversion.")
+    # convert_to_latent_trajectories(
+    #     autoencoder, trajectory_file, num_episodes=5, max_steps=100, output_file=latent_output_file)
+
+    # print("\n✅ Full pipeline complete: training, validation, and conversion.")
+
+    # save_frame_and_reconstruct(autoencoder, trajectory_file, episode_idx=0, step_idx=50,
+    #                                      original_output_path="original_image.png", reconstructed_output_path="reconstructed_image.png")

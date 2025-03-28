@@ -505,8 +505,6 @@ def convert_to_latent_trajectories(autoencoder: torch.nn.Module, input_file: str
     return output_file
 
 # Définition du modèle LSTM
-
-
 class ActionToObservationLSTM(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int = 2):
         super(ActionToObservationLSTM, self).__init__()
