@@ -62,7 +62,7 @@ def train_predictive_mlp(
             # One-hot encode all actions
             action_vector = np.zeros(num_agents * num_actions)
             for j in range(num_agents):
-                a = curr["actions"][f"agent_{j}"]
+                a = curr["joint_action"][f"agent_{j}"]
                 action_vector[j * num_actions + a] = 1
 
             input_vector = np.concatenate([latent_frame, action_vector])
@@ -174,7 +174,7 @@ if __name__ == "__main__":
     step_idx = 0 # random.randint(0, len(steps) - 2)
 
     step_data = load_episode_step_data(file_path=trajectory_file_path, episode_idx= random_episode, step_idx= step_idx)
-    actions = step_data["actions"]
+    actions = step_data["joint_action"]
     print("Played actions: ", actions)
     frame = np.array(step_data["frame"])
     print("===> ", frame.shape)

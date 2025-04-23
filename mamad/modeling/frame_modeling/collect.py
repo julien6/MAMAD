@@ -31,15 +31,15 @@ Trajectories = Dict[str, Trajectory]
 #
 # {
 # "episode_0":{
-# "step_0": {"frame": [58,...], "actions": {"agent_0": [0,...], "agent_1": [0,...]}},
-# "step_1": {"frame": [58,...], "actions": {"agent_0": [0,...], "agent_1": [0,...]}},
-# "step_2": {"frame": [58,...], "actions": {"agent_0": [0,...], "agent_1": [0,...]}},
+# "step_0": {"frame": [58,...], "joint_action": {"agent_0": [0,...], "agent_1": [0,...]}},
+# "step_1": {"frame": [58,...], "joint_action": {"agent_0": [0,...], "agent_1": [0,...]}},
+# "step_2": {"frame": [58,...], "joint_action": {"agent_0": [0,...], "agent_1": [0,...]}},
 # ...
 # },
 # "episode_1":{
-# "step_0": {"frame": [58,...], "actions": {"agent_0": [0,...], "agent_1": [0,...]}},
-# "step_1": {"frame": [58,...], "actions": {"agent_0": [0,...], "agent_1": [0,...]}},
-# "step_2": {"frame": [58,...], "actions": {"agent_0": [0,...], "agent_1": [0,...]}},
+# "step_0": {"frame": [58,...], "joint_action": {"agent_0": [0,...], "agent_1": [0,...]}},
+# "step_1": {"frame": [58,...], "joint_action": {"agent_0": [0,...], "agent_1": [0,...]}},
+# "step_2": {"frame": [58,...], "joint_action": {"agent_0": [0,...], "agent_1": [0,...]}},
 # ...
 # },
 # ...
@@ -110,7 +110,7 @@ def collect_trajectories(env, action_sampler: ActionSampler = None, num_episodes
                                for i, agent in enumerate(agents)}
 
                 trajectory_step = {
-                    "frame": frame.tolist(), "actions": actions}
+                    "frame": frame.tolist(), "joint_action": actions}
 
                 frame = env.render(mode="rgb_array")
 
@@ -199,4 +199,4 @@ if __name__ == '__main__':
 
     # output_file_path = "trajectories.json"
 
-    print(load_episode_step_data(output_file_path, 0, 0)["actions"])
+    print(load_episode_step_data(output_file_path, 0, 0)["joint_action"])

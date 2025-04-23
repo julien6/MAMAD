@@ -31,15 +31,15 @@ Trajectories = Dict[str, Trajectory]
 #
 # {
 # "episode_0":{
-# "step_0": {"observations": {"piston_0": [58,...], "piston_1": [58,...]}, "actions": {"piston_0": [0,...], "piston_1": [0,...]}},
-# "step_0": {"observations": {"piston_0": [58,...], "piston_1": [58,...]}, "actions": {"piston_0": [0,...], "piston_1": [0,...]}},
-# "step_0": {"observations": {"piston_0": [58,...], "piston_1": [58,...]}, "actions": {"piston_0": [0,...], "piston_1": [0,...]}},
+# "step_0": {"joint_observation": {"piston_0": [58,...], "piston_1": [58,...]}, "joint_action": {"piston_0": [0,...], "piston_1": [0,...]}},
+# "step_0": {"joint_observation": {"piston_0": [58,...], "piston_1": [58,...]}, "joint_action": {"piston_0": [0,...], "piston_1": [0,...]}},
+# "step_0": {"joint_observation": {"piston_0": [58,...], "piston_1": [58,...]}, "joint_action": {"piston_0": [0,...], "piston_1": [0,...]}},
 # ...
 # },
 # "episode_0":{
-# "step_0": {"observations": {"piston_0": [58,...], "piston_1": [58,...]}, "actions": {"piston_0": [0,...], "piston_1": [0,...]}},
-# "step_0": {"observations": {"piston_0": [58,...], "piston_1": [58,...]}, "actions": {"piston_0": [0,...], "piston_1": [0,...]}},
-# "step_0": {"observations": {"piston_0": [58,...], "piston_1": [58,...]}, "actions": {"piston_0": [0,...], "piston_1": [0,...]}},
+# "step_0": {"joint_observation": {"piston_0": [58,...], "piston_1": [58,...]}, "joint_action": {"piston_0": [0,...], "piston_1": [0,...]}},
+# "step_0": {"joint_observation": {"piston_0": [58,...], "piston_1": [58,...]}, "joint_action": {"piston_0": [0,...], "piston_1": [0,...]}},
+# "step_0": {"joint_observation": {"piston_0": [58,...], "piston_1": [58,...]}, "joint_action": {"piston_0": [0,...], "piston_1": [0,...]}},
 # ...
 # },
 # ...
@@ -98,7 +98,7 @@ def collect_pistonball_trajectories(num_episodes=100, max_steps=100, file_path="
                     agent: actions[agent].tolist() for agent in actions.keys()}
                 # episode_trajectory.append((observation_vector, action_vector))
                 trajectory_step = {
-                    "observations": observation_vector, "actions": action_vector}
+                    "joint_observation": observation_vector, "joint_action": action_vector}
 
                 observations = new_observations
 
@@ -167,7 +167,7 @@ def save_joint_observations_as_a_concatenated_image(joint_transition, output_pat
 
     # Concaténer les observations de chaque agent en une seule liste et leur donner une forme (457, 120, 3)
     concatenated_obs = np.concatenate([np.array(obs).reshape(
-        (457, 120, 3)) for obs in joint_transition["observations"].values()], axis=1)
+        (457, 120, 3)) for obs in joint_transition["joint_observation"].values()], axis=1)
 
     # Sauvegarder l'image en PNG
     img = Image.fromarray(concatenated_obs.astype('uint8'), 'RGB')
@@ -284,7 +284,7 @@ def train_autoencoder(file_path: str, num_episodes: int, max_steps: int, epochs:
 
                 # Concaténer les observations en une seule liste et les préparer pour le modèle
                 observations = np.concatenate(
-                    [np.array(obs) / 255 for obs in step_data["observations"].values()])
+                    [np.array(obs) / 255 for obs in step_data["joint_observation"].values()])
                 # Reshape en (nombre_d_observations, 457*120*3)
                 observations = observations.reshape(-1, 457 * 120 * 3)
 
@@ -345,7 +345,7 @@ def validate_autoencoder(autoencoder, file_path: str, num_episodes: int, max_ste
                 continue
 
             observations = np.concatenate(
-                [np.array(obs) / 255 for obs in step_data["observations"].values()])
+                [np.array(obs) / 255 for obs in step_data["joint_observation"].values()])
             observations = observations.reshape(-1, 457 * 120 * 3)
             observations = torch.tensor(observations, dtype=torch.float32)
 
@@ -396,7 +396,7 @@ def save_random_observation_and_reconstruction(autoencoder, file_path: str, epis
 
     # Concaténer toutes les observations et choisir une au hasard
     observations = np.concatenate(
-        [np.array(obs) for obs in step_data["observations"].values()]) / 255
+        [np.array(obs) for obs in step_data["joint_observation"].values()]) / 255
     # Reshape en (nombre_observations, 457*120*3)
     observations = observations.reshape(-1, 457 * 120 * 3)
     random_idx = random.randint(0, observations.shape[0] - 1)
@@ -471,8 +471,8 @@ def convert_to_latent_trajectories(autoencoder: torch.nn.Module, input_file: str
                     first_step = False
 
                     # Extraire les observations et les actions
-                    real_observations = data["observations"]
-                    actions = data["actions"]
+                    real_observations = data["joint_observation"]
+                    actions = data["joint_action"]
 
                     # Concaténer les observations en une seule matrice pour l'encoder
                     observations_matrix = np.stack(
@@ -492,8 +492,8 @@ def convert_to_latent_trajectories(autoencoder: torch.nn.Module, input_file: str
 
                     # Écrire les données latentes dans le fichier de sortie
                     latent_step = {
-                        "observations": latent_observations_dict,
-                        "actions": actions
+                        "joint_observation": latent_observations_dict,
+                        "joint_action": actions
                     }
                     f_out.write(f'"{step_key}": {json.dumps(latent_step)}')
 
@@ -544,7 +544,7 @@ def train_lstm_from_latent_trajectories(latent_trajectories_file: str, lstm_mode
         for i in range(len(steps) - 1):
             # Concaténer toutes les actions et observations de chaque agent pour chaque étape
             action_concat = np.concatenate(
-                [steps[i]["actions"][agent] for agent in steps[i]["actions"]])
+                [steps[i]["joint_action"][agent] for agent in steps[i]["joint_action"]])
             observation_concat = np.concatenate(
                 [steps[i + 1]["observations"][agent] for agent in steps[i + 1]["observations"]])
 

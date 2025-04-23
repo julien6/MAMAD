@@ -32,7 +32,7 @@ def evaluate_model(model, dataset, device="cpu", batch_size=128):
 
     mse_avg = mse_total / n
     mae_avg = mae_total / n
-    cosine_avg = cosine_total / n  # moyenne des similarités
+    cosine_avg = cosine_total / n
 
     print("Evaluation results:")
     print(f"  MSE:   {mse_avg:.6f}")

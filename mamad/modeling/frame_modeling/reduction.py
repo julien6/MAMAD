@@ -345,7 +345,7 @@ def convert_to_latent_trajectories(autoencoder: torch.nn.Module, input_file: str
                 # Build new step with latent representation
                 latent_step = {
                     "latent_frame": latent_vector,
-                    "actions": step_data["actions"]
+                    "joint_action": step_data["joint_action"]
                 }
 
                 f_out.write(f'\n"step_{step_idx}": {json.dumps(latent_step)}')

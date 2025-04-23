@@ -20,16 +20,16 @@ class OvercookedTransitionDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
 
-        obs_agent1 = np.array(sample["observations"][0])
-        obs_agent2 = np.array(sample["observations"][1])
-        obsp1_agent1 = np.array(sample["next_observations"][0])
-        obsp1_agent2 = np.array(sample["next_observations"][1])
+        obs_agent1 = np.array(sample["joint_observation"][0])
+        obs_agent2 = np.array(sample["joint_observation"][1])
+        obsp1_agent1 = np.array(sample["next_joint_observations"][0])
+        obsp1_agent2 = np.array(sample["next_joint_observations"][1])
 
         obs = np.concatenate([obs_agent1, obs_agent2])       # (192,)
         obsp1 = np.concatenate([obsp1_agent1, obsp1_agent2]) # (192,)
 
         # One-hot encode actions (discrete, 6 actions possibles)
-        action1, action2 = sample["actions"]
+        action1, action2 = sample["joint_action"]
         action1_oh = np.eye(6)[action1]
         action2_oh = np.eye(6)[action2]
 
