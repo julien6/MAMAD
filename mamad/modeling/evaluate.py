@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 from torch.utils.data import DataLoader
-from train import OvercookedTransitionDataset, OvercookedPredictor
+from mamad.modeling.prepare_data import OvercookedTransitionDataset, OvercookedPredictor
 
 def evaluate_model(model, dataset, device="cpu", batch_size=128):
     model.eval()

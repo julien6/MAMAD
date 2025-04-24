@@ -115,8 +115,10 @@ def collect_trajectories(env, action_sampler: ActionSampler = None, num_episodes
                 if not isinstance(joint_action, Dict):
                     agents = [f'agent_{i}'.format(i)
                               for i in range(0, len(joint_action))]
-                    joint_obs = {agent: joint_obs["both_agent_obs"][index].tolist() for index, agent in enumerate(agents)}
-                    joint_action = {agent: joint_action[index] for index, agent in enumerate(agents)}
+                    joint_obs = {agent: joint_obs["both_agent_obs"][index].tolist(
+                    ) for index, agent in enumerate(agents)}
+                    joint_action = {agent: joint_action[index]
+                                    for index, agent in enumerate(agents)}
 
                 trajectory_step = {
                     "joint_observation": joint_obs, "joint_action": joint_action}
@@ -139,12 +141,12 @@ def collect_trajectories(env, action_sampler: ActionSampler = None, num_episodes
 
 def load_episode_step_data(file_path: str, episode_idx: int, step_idx: int):
     """
-    Charge la trajectoire d'un épisode donné, extrait les joint_action et observations d'un pas spécifique.
+    Loads the trajectory of a given episode, extracting the joint_action and observations for a specific step.
 
     Parameters:
-        file_path (str): Chemin du fichier JSON contenant les trajectoires.
-        episode_idx (int): L'indice de l'épisode à charger.
-        step_idx (int): Le numéro du pas de l'épisode pour lequel les observations seront concaténées.
+        file_path (str): Path to the JSON file containing the trajectories.
+        episode_idx (int): The index of the episode to load.
+        step_idx (int): The step number of the episode for which the observations will be concatenated.
     """
     # Variables pour suivre l'épisode et le pas actuels
     current_episode = -1
@@ -169,10 +171,12 @@ def load_episode_step_data(file_path: str, episode_idx: int, step_idx: int):
 
     if step_data is None:
         print(
-            f"La trajectoire de l'épisode {episode_idx} pour l'étape {step_idx} n'a pas été trouvé dans le fichier.")
-        return
+            f"The trajectory of episode {episode_idx} for step {step_idx} was not found in the file.")
+        return None
 
     step_data = step_data.replace(f'"step_{step_idx}": ', "")
+    if step_data[-4:] == "}}}\n":
+        step_data = step_data[:-2]
     if step_data[-5:] == "}}},\n":
         step_data = step_data[:-3]
     if step_data[-5:] == "]}}}\n":
@@ -181,7 +185,6 @@ def load_episode_step_data(file_path: str, episode_idx: int, step_idx: int):
         step_data = step_data[:-2]
     if step_data[-2:] == ",\n":
         step_data = step_data[:-2]
-
     step_data = json.loads(step_data)
     return step_data
 
@@ -198,21 +201,14 @@ if __name__ == '__main__':
 
     # Step 1.1 - Initialize the Overcooked-AI environment
     layout_mdp = OvercookedGridworld.from_layout_name("asymmetric_advantages")
-    core_env = OvercookedEnv.from_mdp(layout_mdp, horizon=200)
+    core_env = OvercookedEnv.from_mdp(layout_mdp, horizon=400)
     config = {'base_env': core_env,
               'featurize_fn': core_env.featurize_state_mdp}
     env = gym.make('Overcooked-v0', **config)
 
     output_file_path = collect_trajectories(
-        env, num_episodes=1, max_steps=3, action_sampler=OvercookedActionSampler())
+        env, num_episodes=2, max_steps=3, action_sampler=OvercookedActionSampler())
 
     # output_file_path = "trajectories.json"
 
     print(load_episode_step_data(output_file_path, 0, 0)["joint_action"])
-
-    # obs_next, reward, done, info = env.step(joint_action)
-    # traj.append({
-    #     "joint_observation": {agent: joint_obs["both_agent_obs"][index] for index, agent in enumerate(agents)},
-    #     "joint_action": {agent: joint_action[index] for index, agent in enumerate(agents)},
-    #     "next_joint_observations": {agent: obs_next["both_agent_obs"][index] for index, agent in enumerate(agents)}
-    # })

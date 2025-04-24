@@ -5,3 +5,4 @@ matplotlib
 tensorflow
 pettingzoo
 scikit-image
+optuna
