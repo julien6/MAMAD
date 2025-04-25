@@ -6,3 +6,4 @@ tensorflow
 pettingzoo
 scikit-image
 optuna
+scikit-learn

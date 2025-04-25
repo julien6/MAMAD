@@ -59,9 +59,50 @@ def load_lstm_model(checkpoint_path: str) -> Tuple[ODF_LSTM, Dict]:
     return model, checkpoint['metadata']
 
 
+def apply_teacher_forcing(model, x_batch, y_batch, teacher_forcing_ratio):
+    """
+    Applies teacher forcing when training an LSTM.
+    At each time step, the model uses the true input or its own prediction
+    based on the teacher_forcing_ratio.
+
+    Args:
+        model: the LSTM model to train
+        x_batch: input tensor of shape (batch, seq_len, input_dim)
+        y_batch: target tensor of shape (batch, seq_len, output_dim)
+        teacher_forcing_ratio: probability to use the true next input
+
+    Returns:
+        outputs: predicted tensor of same shape as y_batch
+    """
+    batch_size, seq_len, _ = x_batch.size()
+    device = x_batch.device
+    outputs = torch.zeros_like(y_batch, device=device)
+    input_t = x_batch[:, 0:1, :]  # first time step input
+    hidden = None
+
+    for t in range(seq_len):
+        out, hidden = model.lstm(input_t, hidden)
+        pred = model.fc(out)
+        outputs[:, t:t+1, :] = pred
+
+        if t + 1 < seq_len:
+            use_teacher = random.random() < teacher_forcing_ratio
+            if use_teacher:
+                input_t = x_batch[:, t+1:t+2, :]  # use ground truth input
+            else:
+                next_input = x_batch[:, t+1:t+2, :].clone().to(device)
+                obs_size = y_batch.size(-1)
+                next_input[:, :, :obs_size] = pred.detach()
+                input_t = next_input
+
+    return outputs
+
+
 def train_odf_lstm(file_path: str, metadata: Dict,
                    hidden_dim: int = 128, num_layers: int = 1,
-                   num_epochs: int = 10, batch_size: int = 1, lr: float = 1e-3, save_path: str = "checkpoints/lstm_checkpoint.pth"):
+                   num_epochs: int = 10, batch_size: int = 1, lr: float = 1e-3,
+                   teacher_forcing_ratio: float = None,
+                   save_path: str = "checkpoints/lstm_checkpoint.pth"):
     """
     Initializes and trains an ODF_LSTM model from the provided trajectory file and metadata.
     """
@@ -92,11 +133,14 @@ def train_odf_lstm(file_path: str, metadata: Dict,
     print("\n=== Training LSTM model ===")
     model.train()
     for epoch in range(num_epochs):
-        epoch_loss = 0.0
+        epoch_loss = 1.0
         for x_batch, y_batch in dataloader:
-            pred = model(x_batch)
+            if teacher_forcing_ratio is None:
+                pred = model(x_batch)
+            else:
+                pred = apply_teacher_forcing(
+                    model, x_batch, y_batch, teacher_forcing_ratio)
             loss = criterion(pred, y_batch)
-
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -152,7 +196,8 @@ def get_search_intervals(metadata: Dict, hp_list: List[str]) -> Dict[str, Tuple[
 
 
 def run_hpo(file_path: str, metadata: Dict, hp_list: List[str], n_trials: int = 20,
-            eval_ratio: float = 0.2) -> Dict:
+            eval_ratio: float = 0.2, num_epochs=None, lr: float = None, batch_size: int = None,
+            num_layers: int = None, hidden_dim: float = None, teacher_forcing_ratio=None) -> Dict:
     """
     Runs an Optuna optimization to find the best hyperparameters within the provided ranges.
     """
@@ -163,24 +208,25 @@ def run_hpo(file_path: str, metadata: Dict, hp_list: List[str], n_trials: int = 
 
     def objective(trial):
         # Suggest hyperparams
-        hidden_dim = int(trial.suggest_int("hidden_dim", int(
+        _hidden_dim = hidden_dim if hidden_dim is not None else int(trial.suggest_int("hidden_dim", int(
             search_space["hidden_dim"][0]), int(search_space["hidden_dim"][1])))
-        num_layers = int(trial.suggest_int("num_layers", int(
+        _num_layers = num_layers if num_layers is not None else int(trial.suggest_int("num_layers", int(
             search_space["num_layers"][0]), int(search_space["num_layers"][1])))
-        batch_size = int(trial.suggest_int("batch_size", int(
+        _batch_size = batch_size if batch_size is not None else int(trial.suggest_int("batch_size", int(
             search_space["batch_size"][0]), int(search_space["batch_size"][1])))
-        lr = trial.suggest_float(
+        _lr = lr if lr is not None else trial.suggest_float(
             "lr", search_space["lr"][0], search_space["lr"][1], log=True)
-        num_epochs = int(trial.suggest_int("num_epochs", int(
+        _num_epochs = num_epochs if num_epochs is not None else int(trial.suggest_int("num_epochs", int(
             search_space["num_epochs"][0]), int(search_space["num_epochs"][1])))
 
         # Training on ALL trajectories
         model = train_odf_lstm(file_path, metadata,
-                               hidden_dim=hidden_dim,
-                               num_layers=num_layers,
-                               num_epochs=num_epochs,
-                               batch_size=batch_size,
-                               lr=lr)
+                               hidden_dim=_hidden_dim,
+                               num_layers=_num_layers,
+                               num_epochs=_num_epochs,
+                               batch_size=_batch_size,
+                               lr=_lr,
+                               teacher_forcing_ratio=teacher_forcing_ratio)
 
         # Evaluation on the sample of trajectories
         model.eval()
@@ -272,38 +318,41 @@ if __name__ == '__main__':
 
     # === TRAIN ===
 
-    # best_hparams = run_hpo(
-    #     file_path="trajectories.json",
-    #     metadata=metadata,
-    #     hp_list=["hidden_dim", "num_layers", "batch_size", "lr", "num_epochs"],
-    #     n_trials=20,
-    #     eval_ratio=0.2  # test on 20% of trajectories
-    # )
+    best_hparams = run_hpo(
+        file_path="trajectories.json",
+        metadata=metadata,
+        hp_list=["hidden_dim", "num_layers", "batch_size", "lr", "num_epochs"],
+        n_trials=20,
+        eval_ratio=0.2,  # test on 20% of trajectories
+        num_epochs=200,
+        teacher_forcing_ratio=1.
+    )
 
-    # print("Using best hyper-parameters for the final training")
-    # model = train_odf_lstm("trajectories.json", metadata, **best_hparams)
+    print("Using best hyper-parameters for the final training")
+    model = train_odf_lstm("trajectories.json", metadata,
+                           teacher_forcing_ratio=1., num_epochs=2000, **best_hparams)
 
     # === FINAL TEST : Run model on random (obs, action) pair ===
-    print("\n=== Testing run_ODF_LSTM on a random transition ===")
-    random_episode = random.randint(0, metadata["max_episode"] - 1)
-    random_step = random.randint(
-        0, metadata["max_step"] - 2)  # pour que step+1 existe
+    # print("\n=== Testing run_ODF_LSTM on a random transition ===")
+    # random_episode = random.randint(0, metadata["max_episode"] - 1)
+    # random_step = random.randint(
+    #     0, metadata["max_step"] - 2)  # pour que step+1 existe
 
-    current_step = load_episode_step_data(
-        "trajectories.json", random_episode, random_step)
-    next_step = load_episode_step_data(
-        "trajectories.json", random_episode, random_step + 1)
+    # current_step = load_episode_step_data(
+    #     "trajectories.json", random_episode, random_step)
+    # next_step = load_episode_step_data(
+    #     "trajectories.json", random_episode, random_step + 1)
 
-    if current_step is not None and next_step is not None:
-        obs = current_step["joint_observation"]
-        act = current_step["joint_action"]
-        true_next_obs = next_step["joint_observation"]
+    # if current_step is not None and next_step is not None:
+    #     obs = current_step["joint_observation"]
+    #     act = current_step["joint_action"]
+    #     true_next_obs = next_step["joint_observation"]
 
-        odf_runner = ODF_LSTM_runner()
-        predicted_next_obs = odf_runner.run_ODF_LSTM(obs, act)
+    #     odf_runner = ODF_LSTM_runner()
+    #     predicted_next_obs = odf_runner.run_ODF_LSTM(obs, act)
 
-        print(f"Episode {random_episode}, Step {random_step}")
-        print("\n[Agent 0] True next obs (first 10):")
-        print(true_next_obs["agent_0"][:10])
-        print("[Agent 0] Predicted next obs (first 10):")
-        print(np.round(predicted_next_obs["agent_0"][:10], 2))
+    #     print(f"Episode {random_episode}, Step {random_step}")
+    #     print("\n[Agent 0] True next obs (first 10):")
+    #     print(true_next_obs["agent_0"][:10])
+    #     print("[Agent 0] Predicted next obs (first 10):")
+    #     print(np.round(predicted_next_obs["agent_0"][:10], 2))
