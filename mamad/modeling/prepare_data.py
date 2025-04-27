@@ -21,7 +21,7 @@ def infer_metadata_from_json(file_path: str, max_episodes_to_check: int = 20) ->
     step_data = load_episode_step_data(file_path, episode_idx, 0)
 
     if step_data is None:
-        raise ValueError("Impossible de charger la step 0 de l'épisode 0.")
+        raise ValueError("Impossible to load the step 0 from episode 0.")
 
     # Étape 2 : extraire l'ordre des agents
     agent_order = list(step_data["joint_action"].keys())

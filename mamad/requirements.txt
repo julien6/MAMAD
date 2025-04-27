@@ -7,3 +7,9 @@ pettingzoo
 scikit-image
 optuna
 scikit-learn
+psutil
+jax==0.4.13
+jaxlib==0.4.13
+flax==0.6.9
+optax==0.1.7
+tqdm

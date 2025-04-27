@@ -1,16 +1,58 @@
 import pickle
 import os
+import torch
 import torch.nn as nn
 import numpy as np
-import torch
-import optuna
 import random
+import optuna
+import torch
+import psutil
+import platform
+import time
 
-from torch.utils.data import Dataset, DataLoader
-from typing import List, Tuple
+from torch.utils.data import DataLoader
+from typing import List, Tuple, Dict
 from collect import load_episode_step_data
-from typing import Dict
 from prepare_data import OvercookedSequenceLSTMDatasetLazy, infer_metadata_from_json, load_episode_as_sequence_lazy, one_hot_encode_action
+from hardware_utils import setup_training_environment
+
+# Enable cuDNN autotuner for faster LSTM
+torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
+# Setup environment automatically
+training_env = setup_training_environment()
+training_env.benchmark_mode = True
+device = training_env.device
+
+
+def detect_hardware():
+    print("\n=== Hardware Information ===\n")
+
+    # CPU
+    cpu_count = psutil.cpu_count(logical=True)
+    cpu_freq = psutil.cpu_freq()
+    print(f"CPU Cores       : {cpu_count} cores")
+    print(f"CPU Frequency   : {cpu_freq.max:.2f} MHz")
+
+    # RAM
+    ram = psutil.virtual_memory()
+    print(f"RAM             : {ram.total / (1024**3):.2f} GB")
+
+    # OS
+    print(f"Operating System: {platform.system()} {platform.release()}")
+
+    # GPU
+    if torch.cuda.is_available():
+        print(f"\nGPUs detected ({torch.cuda.device_count()}):")
+        for i in range(torch.cuda.device_count()):
+            print(
+                f"  [{i}] {torch.cuda.get_device_name(i)} - {torch.cuda.get_device_properties(i).total_memory / (1024**3):.2f} GB VRAM")
+    else:
+        print("\nNo GPU available.")
+
+    print("\n=============================\n")
 
 
 class ODF_LSTM(nn.Module):
@@ -21,63 +63,14 @@ class ODF_LSTM(nn.Module):
         self.fc = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x):
-        out, _ = self.lstm(x)  # (batch, seq_len, hidden_dim)
-        return self.fc(out)    # (batch, seq_len, output_dim)
-
-
-def sample_eval_episodes(episode_indices: List[int], ratio: float = 0.2, seed: int = 42) -> List[int]:
-    """
-    Samples a given proportion of episode indices for evaluation.
-
-    Args:
-        episode_indices: Full list of available episode indices
-        ratio: Proportion to use for evaluation (e.g., 0.2 for 20%)
-        seed: Seed for reproducibility
-
-    Returns:
-        List of indices selected for evaluation
-    """
-    assert 0 < ratio < 1, "The ratio must be within (0, 1)"
-    eval_size = max(1, int(len(episode_indices) * ratio))
-    random.seed(seed)
-    return random.sample(episode_indices, eval_size)
-
-
-def load_lstm_model(checkpoint_path: str) -> Tuple[ODF_LSTM, Dict]:
-    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
-
-    model = ODF_LSTM(
-        input_dim=checkpoint['input_dim'],
-        hidden_dim=checkpoint['hidden_dim'],
-        output_dim=checkpoint['output_dim'],
-        num_layers=checkpoint['num_layers']
-    )
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
-
-    print(f"✅ ODF LSTM model restored from {checkpoint_path}")
-    return model, checkpoint['metadata']
+        out, _ = self.lstm(x)
+        return self.fc(out)
 
 
 def apply_teacher_forcing(model, x_batch, y_batch, teacher_forcing_ratio):
-    """
-    Applies teacher forcing when training an LSTM.
-    At each time step, the model uses the true input or its own prediction
-    based on the teacher_forcing_ratio.
-
-    Args:
-        model: the LSTM model to train
-        x_batch: input tensor of shape (batch, seq_len, input_dim)
-        y_batch: target tensor of shape (batch, seq_len, output_dim)
-        teacher_forcing_ratio: probability to use the true next input
-
-    Returns:
-        outputs: predicted tensor of same shape as y_batch
-    """
     batch_size, seq_len, _ = x_batch.size()
-    device = x_batch.device
     outputs = torch.zeros_like(y_batch, device=device)
-    input_t = x_batch[:, 0:1, :]  # first time step input
+    input_t = x_batch[:, 0:1, :]
     hidden = None
 
     for t in range(seq_len):
@@ -88,9 +81,9 @@ def apply_teacher_forcing(model, x_batch, y_batch, teacher_forcing_ratio):
         if t + 1 < seq_len:
             use_teacher = random.random() < teacher_forcing_ratio
             if use_teacher:
-                input_t = x_batch[:, t+1:t+2, :]  # use ground truth input
+                input_t = x_batch[:, t+1:t+2, :]
             else:
-                next_input = x_batch[:, t+1:t+2, :].clone().to(device)
+                next_input = x_batch[:, t+1:t+2, :].clone()
                 obs_size = y_batch.size(-1)
                 next_input[:, :, :obs_size] = pred.detach()
                 input_t = next_input
@@ -98,15 +91,19 @@ def apply_teacher_forcing(model, x_batch, y_batch, teacher_forcing_ratio):
     return outputs
 
 
+def sample_eval_episodes(episode_indices: List[int], ratio: float = 0.2, seed: int = 42) -> List[int]:
+    assert 0 < ratio < 1
+    eval_size = max(1, int(len(episode_indices) * ratio))
+    random.seed(seed)
+    return random.sample(episode_indices, eval_size)
+
+
 def train_odf_lstm(file_path: str, metadata: Dict,
                    hidden_dim: int = 128, num_layers: int = 1,
                    num_epochs: int = 10, batch_size: int = 1, lr: float = 1e-3,
                    teacher_forcing_ratio: float = None,
                    save_path: str = "checkpoints/lstm_checkpoint.pth"):
-    """
-    Initializes and trains an ODF_LSTM model from the provided trajectory file and metadata.
-    """
-    # Sample example to obtain dimensions
+
     x_seq, y_seq = load_episode_as_sequence_lazy(
         file_path=file_path,
         episode_idx=0,
@@ -124,31 +121,79 @@ def train_odf_lstm(file_path: str, metadata: Dict,
         num_actions=metadata["num_actions"],
         nb_step=metadata["max_step"]
     )
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
-    model = ODF_LSTM(input_dim, hidden_dim, output_dim, num_layers)
+    if torch.cuda.is_available():
+        dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size or training_env.batch_size,
+            shuffle=True,
+            num_workers=training_env.num_workers,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2,
+            pin_memory_device="cuda"
+        )
+    else:
+        dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size or training_env.batch_size,
+            shuffle=True,
+            num_workers=training_env.num_workers,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2
+        )
+
+    model = ODF_LSTM(input_dim, hidden_dim, output_dim, num_layers).to(device)
+    if training_env.multi_gpu:
+        model = nn.DataParallel(model)
+    if training_env.use_compile:
+        model = torch.compile(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
 
     print("\n=== Training LSTM model ===")
     model.train()
+    scaler = torch.cuda.amp.GradScaler(enabled=training_env.use_amp)
     for epoch in range(num_epochs):
-        epoch_loss = 1.0
+
+        if training_env.benchmark_mode:
+            start_time = time.time()
+
+        epoch_loss = 0.0
+        frame_count = 0
+
         for x_batch, y_batch in dataloader:
-            if teacher_forcing_ratio is None:
-                pred = model(x_batch)
-            else:
-                pred = apply_teacher_forcing(
-                    model, x_batch, y_batch, teacher_forcing_ratio)
-            loss = criterion(pred, y_batch)
+            x_batch, y_batch = x_batch.to(device), y_batch.to(device)
+
+            batch_size_current = x_batch.size(0)  # taille dynamique
+            frame_count += batch_size_current
+
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+
+            with torch.cuda.amp.autocast(enabled=training_env.use_amp):
+                if teacher_forcing_ratio is None:
+                    pred = model(x_batch)
+                else:
+                    pred = apply_teacher_forcing(
+                        model, x_batch, y_batch, teacher_forcing_ratio)
+                loss = criterion(pred, y_batch)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
             epoch_loss += loss.item()
 
-        print(f"[Epoch {epoch + 1}/{num_epochs}] Loss: {epoch_loss:.6f}")
+        if training_env.benchmark_mode:
+            end_time = time.time()
+            duration = end_time - start_time
+            fps = frame_count / duration
+            print(
+                f"[Epoch {epoch + 1}/{num_epochs}] Loss: {epoch_loss:.6f} | Time: {duration:.2f}s | FPS: {fps:.2f}")
+        else:
+            print(f"[Epoch {epoch + 1}/{num_epochs}] Loss: {epoch_loss:.6f}")
 
-    # === Saving LSTM model with hyperparameter ===
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     torch.save({
         'model_state_dict': model.state_dict(),
@@ -162,6 +207,31 @@ def train_odf_lstm(file_path: str, metadata: Dict,
     print(f"✅ Model saved in {save_path}")
 
     return model
+
+
+def _remove_orig_mod_prefix(state_dict):
+    """Fix for loading models compiled with torch.compile()."""
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        new_key = key.replace("_orig_mod.", "")  # remove _orig_mod prefix
+        new_state_dict[new_key] = value
+    return new_state_dict
+
+
+def load_lstm_model(checkpoint_path: str) -> Tuple[ODF_LSTM, Dict]:
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    model = ODF_LSTM(
+        input_dim=checkpoint['input_dim'],
+        hidden_dim=checkpoint['hidden_dim'],
+        output_dim=checkpoint['output_dim'],
+        num_layers=checkpoint['num_layers']
+    )
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+
+    print(f"✅ ODF LSTM model restored from {checkpoint_path}")
+    return model, checkpoint['metadata']
 
 
 def get_search_intervals(metadata: Dict, hp_list: List[str]) -> Dict[str, Tuple[float, float]]:
@@ -193,6 +263,9 @@ def get_search_intervals(metadata: Dict, hp_list: List[str]) -> Dict[str, Tuple[
         intervals["num_epochs"] = (5, 20)
 
     return intervals
+
+
+torch.cuda.empty_cache()
 
 
 def run_hpo(file_path: str, metadata: Dict, hp_list: List[str], n_trials: int = 20,
@@ -243,6 +316,10 @@ def run_hpo(file_path: str, metadata: Dict, hp_list: List[str], n_trials: int = 
             x_tensor = torch.tensor(
                 x_seq[None, :, :], dtype=torch.float32)  # add batch dim
             y_tensor = torch.tensor(y_seq[None, :, :], dtype=torch.float32)
+
+            x_tensor = x_tensor.to(device)
+            y_tensor = y_tensor.to(device)
+
             with torch.no_grad():
                 pred = model(x_tensor)
                 loss = criterion(pred, y_tensor)
@@ -267,7 +344,7 @@ def prepare_input(obs_dict: Dict[str, List[float]], act_dict: Dict[str, int],
     act = np.concatenate([one_hot_encode_action(
         act_dict[agent], num_actions) for agent in agent_order])
     x = np.concatenate([obs, act])[None, None, :]
-    return torch.tensor(x, dtype=torch.float32)
+    return torch.tensor(x, dtype=torch.float32, device=device)
 
 
 def unpack_output(output: torch.Tensor, agent_order: List[str], obs_dim_per_agent: int) -> Dict[str, List[float]]:
@@ -289,20 +366,24 @@ class ODF_LSTM_runner:
             raise FileNotFoundError(
                 f"Aucun checkpoint trouvé dans {self.checkpoint_path}")
 
-        self.checkpoint = torch.load(
-            self.checkpoint_path, map_location=torch.device("cpu"))
+        self.checkpoint = torch.load(self.checkpoint_path, map_location=device)
+
         self.model = ODF_LSTM(
             input_dim=self.checkpoint["input_dim"],
             hidden_dim=self.checkpoint["hidden_dim"],
             output_dim=self.checkpoint["output_dim"],
             num_layers=self.checkpoint["num_layers"]
         )
-        self.model.load_state_dict(self.checkpoint["model_state_dict"])
+
+        state_dict = self.checkpoint["model_state_dict"]
+        state_dict = _remove_orig_mod_prefix(state_dict)
+        self.model.load_state_dict(state_dict)
         self.model.eval()
 
     def run_ODF_LSTM(self, obs_dict: Dict[str, List[float]], act_dict: Dict[str, int]) -> Dict[str, List[float]]:
         input_tensor = prepare_input(
             obs_dict, act_dict, self.checkpoint["metadata"]["agent_order"], self.checkpoint["metadata"]["num_actions"])
+        input_tensor = input_tensor.to(device)
 
         with torch.no_grad():
             output_tensor = self.model(input_tensor)
@@ -313,6 +394,8 @@ class ODF_LSTM_runner:
 
 
 if __name__ == '__main__':
+
+    detect_hardware()
 
     metadata = infer_metadata_from_json("trajectories.json")
 
