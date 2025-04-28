@@ -298,7 +298,7 @@ def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size):
     preds = model.apply({'params': params}, X)
     final_loss = jnp.mean((preds - Y) ** 2)
 
-    return float(final_loss)  # Optuna attend un float
+    return float(final_loss)  # Optuna excepts a float
 
 
 def run_hpo(X, Y, n_trials=30):
