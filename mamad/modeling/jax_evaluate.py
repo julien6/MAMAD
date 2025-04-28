@@ -35,20 +35,21 @@ class ODF_LSTM_Runner_JAX:
         self.rng = jax.random.PRNGKey(0)  # Dummy RNG
 
     def predict_next_obs(self, joint_obs: Dict[str, List[float]], joint_action: Dict[str, int]) -> Dict[str, List[float]]:
-        obs_vec = []
-        act_vec = []
+        obs_vec = np.array([])
+        act_vec = np.array([])
 
         for agent in self.metadata["agent_order"]:
-            obs_vec += joint_obs[agent]
+            obs_vec = np.concatenate([obs_vec, joint_obs[agent]])
             if agent in joint_action:
-                act_vec += one_hot_encode_action(
+                act_vec = np.concatenate([act_vec, one_hot_encode_action(
                     joint_action[agent], self.metadata["num_actions"]
-                )
+                )])
             else:
                 # If missing, assume a "no-op" action (all zeros)
-                act_vec += [0.0] * self.metadata["num_actions"]
+                act_vec = np.concatenate(
+                    [act_vec, np.array([0.0] * self.metadata["num_actions"])])
 
-        input_vec = np.array(obs_vec + act_vec)
+        input_vec = np.concatenate([obs_vec, act_vec])
         input_vec = jnp.array(input_vec)
         # (batch_size=1, seq_len=1, input_dim)
         input_vec = input_vec[None, None, :]
@@ -74,10 +75,19 @@ def transition_to_vector(joint_obs: Dict[str, List[float]],
                          agent_order: List[str],
                          num_actions: int) -> np.ndarray:
     obs = np.concatenate([np.array(joint_obs[agent]) for agent in agent_order])
-    act = np.concatenate([one_hot_encode_action(
-        joint_action[agent], num_actions) for agent in agent_order])
+
+    act = np.array([])
+    for agent in agent_order:
+        if agent in joint_action:
+            act = np.concatenate([act, one_hot_encode_action(
+                joint_action[agent], num_actions)])
+        else:
+            act = np.concatenate([act, np.array([0.0] * num_actions)])
+    act = np.array(act)
+
     next_obs = np.concatenate([np.array(next_joint_obs[agent])
                               for agent in agent_order])
+
     return np.concatenate([obs, act, next_obs])
 
 
