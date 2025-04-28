@@ -1,3 +1,4 @@
+import time
 from typing import Dict, List, Tuple
 import jax
 import json
@@ -17,8 +18,7 @@ intervals = {
     "num_layers": (1, 3),
     "learning_rate": (1e-5, 1e-2),
     "batch_size": (64, 64),
-    "num_epochs": (5, 5),
-    "seq_len": (1, 1)
+    "num_epochs": (5, 5)
 }
 
 
@@ -55,7 +55,7 @@ def get_search_intervals(metadata: Dict, hp_list: List[str]) -> Dict[str, Tuple[
 metadata = infer_metadata_from_json("trajectories.json")
 
 intervals.update(get_search_intervals(metadata, [
-                 "hidden_size", "num_layers", "learning_rate", "batch_size", "seq_len"]))
+                 "hidden_size", "num_layers", "learning_rate", "batch_size"]))
 
 
 def one_hot_encode_action(action_idx, num_actions):
@@ -161,17 +161,23 @@ def create_train_state(rng, model, learning_rate, input_shape):
     return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
 
-def loss_fn(params, apply_fn, batch):
-    inputs, targets = batch
-    preds = apply_fn({'params': params}, inputs)
-    loss = jnp.mean((preds - targets) ** 2)
+def single_loss_fn(params, apply_fn, x, y):
+    pred = apply_fn({'params': params}, x)
+    loss = jnp.mean((pred[0] - y) ** 2)
     return loss
+
+
+batched_loss_fn = jax.vmap(single_loss_fn, in_axes=(None, None, 0, 0))
 
 
 @jax.jit
 def train_step(state, batch):
-    grads = jax.grad(loss_fn)(state.params, state.apply_fn, batch)
-    return state.apply_gradients(grads=grads)
+    inputs, targets = batch
+    # Compute the loss for every batch of a coup
+    losses = batched_loss_fn(state.params, state.apply_fn, inputs, targets)
+    mean_loss = jnp.mean(losses)
+    grads = jax.grad(lambda params: mean_loss)(state.params)
+    return state.apply_gradients(grads=grads), mean_loss
 
 
 def create_batches(X, Y, batch_size, rng=None):
@@ -189,28 +195,50 @@ def create_batches(X, Y, batch_size, rng=None):
 
 
 def train_model(state, X, Y, batch_size, num_epochs, rng):
+    total_time = 0.0
+    total_samples = 0
+
     for epoch in trange(num_epochs, desc="Training epochs"):
+        start_time = time.time()
         epoch_rng = jax.random.fold_in(rng, epoch)
-        for batch in create_batches(X, Y, batch_size, epoch_rng):
-            state = train_step(state, batch)
+
+        for batch_X, batch_Y in create_batches(X, Y, batch_size, epoch_rng):
+            state, batch_loss = train_step(state, (batch_X, batch_Y))
+            total_samples += batch_X.shape[0]
+
+        epoch_time = time.time() - start_time
+        total_time += epoch_time
+        fps = total_samples / total_time
+
+        print(
+            f"[Epoch {epoch+1}/{num_epochs}] Time: {epoch_time:.2f}s | Samples seen: {total_samples} | Avg FPS: {fps:.2f}")
+
+    print(f"\n✅ Training completed in {total_time:.2f} seconds total.")
+    print(f"✅ Average samples/sec (FPS): {fps:.2f}")
+
     return state
+
 
 @jax.pmap
 def train_step_pmap(state, batch):
-    grads = jax.grad(loss_fn)(state.params, state.apply_fn, batch)
+    grads = jax.grad(batched_loss_fn)(state.params, state.apply_fn, batch)
     return state.apply_gradients(grads=grads)
 
 
-def evaluate_model(state, eval_data):
+@jax.jit
+def evaluate_model(state, inputs, targets):
+    losses = batched_loss_fn(state.params, state.apply_fn, inputs, targets)
+    return jnp.mean(losses)
+
+
+def batched_evaluate_model(state, inputs, targets, batch_size):
     total_loss = 0.0
     total_samples = 0
 
-    for batch in eval_data:
-        inputs, targets = batch
-        preds = state.apply_fn({'params': state.params}, inputs)
-        loss = jnp.mean((preds - targets) ** 2)
-        total_loss += loss * inputs.shape[0]
-        total_samples += inputs.shape[0]
+    for batch_inputs, batch_targets in create_batches(inputs, targets, batch_size):
+        loss = evaluate_model(state, batch_inputs, batch_targets)
+        total_loss += loss * batch_inputs.shape[0]
+        total_samples += batch_inputs.shape[0]
 
     avg_loss = total_loss / total_samples
     return avg_loss
@@ -240,7 +268,7 @@ def objective(trial):
     state = train_model(state, X_seq, Y, batch_size, num_epochs, rng)
 
     # 4. Evaluate
-    eval_loss = evaluate_model(state, create_batches(X_seq, Y, batch_size))
+    eval_loss = batched_evaluate_model(state, X_seq, Y, batch_size)
 
     return float(eval_loss)
 
@@ -266,9 +294,9 @@ if __name__ == '__main__':
         hidden_size=study.best_params["hidden_size"], output_size=output_size, num_layers=study.best_params["num_layers"])
 
     rng = jax.random.PRNGKey(0)
-    # batch_size, seq_len, input_dim
+    # batch_size, input_dim
     state = create_train_state(
-        rng, model, study.best_params["learning_rate"], (X.shape[0], 1, X.shape[1]))
+        rng, model, study.best_params["learning_rate"], (1, X.shape[0], X.shape[1]))
 
     state = train_model(
         state, X_seq, Y, study.best_params["batch_size"], study.best_params["num_epochs"], rng)
@@ -285,6 +313,7 @@ if __name__ == '__main__':
         pickle.dump(save_dict, f)
 
     # Evaluate the model
-    eval_loss = evaluate_model(state, create_batches(
-        X_seq, Y, study.best_params["batch_size"]))
+    eval_loss = batched_evaluate_model(
+        state, X_seq, Y, study.best_params["batch_size"])
+
     print(f"Evaluation Loss on training set: {eval_loss:.6f}")
