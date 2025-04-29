@@ -1,61 +1,172 @@
-import time
-from typing import Dict, List, Tuple
-import jax
 import json
+import pickle
+import jax
 import jax.numpy as jnp
 import optax
-import pickle
+import jax
+import psutil
 import optuna
 
-from tqdm import trange, tqdm
 from flax import linen as nn
 from flax.training import train_state
-from prepare_data import infer_metadata_from_json
+from tqdm import trange
+from flax.training import common_utils
+from flax.training import checkpoints
+from flax import jax_utils
 
 
-intervals = {
-    "hidden_size": (64, 512),
-    "num_layers": (1, 3),
-    "learning_rate": (1e-5, 1e-2),
-    "batch_size": (64, 64),
-    "num_epochs": (5, 5)
-}
+def get_hardware_info():
+    n_devices = jax.local_device_count()
+    devices = jax.devices()
+
+    hardware_info = {
+        "num_devices": n_devices,
+        "device_type": devices[0].device_kind if devices else "Unknown",
+        "num_cpu_cores": psutil.cpu_count(logical=True),
+        "total_ram_gb": psutil.virtual_memory().total / (1024**3)
+    }
+
+    # Approximate VRAM info only if CUDA visible (optional fallback)
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        hardware_info["total_memory_gb"] = mem_info.total / (1024**3)
+        pynvml.nvmlShutdown()
+    except Exception as e:
+        hardware_info["total_memory_gb"] = None  # Cannot detect
+
+    return hardware_info
 
 
-def get_search_intervals(metadata: Dict, hp_list: List[str]) -> Dict[str, Tuple[float, float]]:
-    """
-    Determines the relevant search intervals for each hyperparameter to be optimized.
-    """
-    obs_size = metadata["obs_dim_per_agent"] * len(metadata["agent_order"])
-    action_size = metadata["num_actions"] * len(metadata["agent_order"])
-    input_dim = obs_size + action_size
+def get_hyperparameter_search_space(hardware_info):
+    search_space = {}
 
-    intervals = {}
+    # Rule: if you have a lot of VRAM you can afford bigger LSTM
+    if hardware_info["total_memory_gb"] and hardware_info["total_memory_gb"] >= 16:
+        search_space["hidden_size"] = (128, 1024)  # large models
+    else:
+        search_space["hidden_size"] = (64, 512)    # smaller models
 
-    if "hidden_dim" in hp_list:
-        # rule of thumb: 1x to 5x the input size
-        intervals["hidden_dim"] = (input_dim, input_dim * 5)
+    # usually between 1 and 4 layers for stability
+    search_space["num_layers"] = (1, 4)
+    search_space["learning_rate"] = (1e-4, 1e-2)  # classic interval for Adam
+    search_space["batch_size"] = (
+        hardware_info["num_devices"], hardware_info["num_devices"]*8)
 
-    if "num_layers" in hp_list:
-        # in general, between 1 and 3 are sufficient
-        intervals["num_layers"] = (1, 3)
+    return search_space
 
-    if "batch_size" in hp_list:
-        intervals["batch_size"] = (1, 8)  # LSTM batch-wise training
-
-    if "lr" in hp_list:
-        intervals["lr"] = (1e-4, 1e-2)  # standard rule
-
-    if "num_epochs" in hp_list:
-        intervals["num_epochs"] = (5, 20)
-
-    return intervals
+# Simple LSTM model definition
 
 
-metadata = infer_metadata_from_json("trajectories.json")
+class SimpleLSTM(nn.Module):
+    hidden_size: int
+    output_size: int
+    num_layers: int = 1
 
-intervals.update(get_search_intervals(metadata, [
-                 "hidden_size", "num_layers", "learning_rate", "batch_size"]))
+    class StackedLSTM(nn.Module):
+        hidden_size: int
+        num_layers: int
+
+        def setup(self):
+            self.layers = [
+                nn.OptimizedLSTMCell() for _ in range(self.num_layers)
+            ]
+
+        def __call__(self, carry, x_t):
+            new_carry = []
+            for i, layer in enumerate(self.layers):
+                carry[i], x_t = layer(carry[i], x_t)
+                new_carry.append(carry[i])
+            return new_carry, x_t
+
+    def setup(self):
+        # Stack multiple layers into a single scanned module
+        self.stacked_lstm = nn.scan(
+            SimpleLSTM.StackedLSTM,
+            variable_broadcast="params",
+            split_rngs={"params": False},
+            in_axes=1, out_axes=1
+        )(hidden_size=self.hidden_size, num_layers=self.num_layers)
+
+        self.dense = nn.Dense(self.output_size)
+
+    @nn.compact
+    def __call__(self, x):
+        batch_size = x.shape[0]
+
+        # Initialize carry for each layer
+        carry = [
+            nn.OptimizedLSTMCell.initialize_carry(
+                jax.random.PRNGKey(i), (batch_size,), self.hidden_size
+            )
+            for i in range(self.num_layers)
+        ]
+
+        carry, y = self.stacked_lstm(carry, x)
+        preds = self.dense(y)
+        return preds
+
+
+# Create a train state
+
+
+def create_train_state(rng, model, learning_rate, input_shape):
+    params = model.init(rng, jnp.ones(input_shape))['params']
+
+    # Learning rate schedule (cosine decay)
+    lr_schedule = optax.cosine_decay_schedule(
+        init_value=learning_rate,
+        decay_steps=1000,    # adjust depending on dataset size
+        alpha=0.1            # final LR will be 0.1 * init_value
+    )
+
+    # Chained optimizer with gradient clipping
+    tx = optax.chain(
+        optax.clip_by_global_norm(1.0),  # clip gradients if norm > 1.0
+        optax.adam(lr_schedule)
+    )
+
+    return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
+
+# Loss function comparing prediction to target at every timestep
+
+
+def single_loss_fn(params, apply_fn, input_sample, target_sample):
+    # [None, ...] to fake batch axis
+    preds = apply_fn({'params': params}, input_sample[None, ...])
+    preds = preds[0]  # remove fake batch axis
+    loss = jnp.mean((preds - target_sample) ** 2)
+    return loss
+
+
+batched_loss_fn = jax.vmap(single_loss_fn, in_axes=(None, None, 0, 0))
+
+
+# Single training step
+def build_train_step(pmap_enabled):
+    def _single_device_train_step(state, batch_inputs, batch_targets):
+        def loss(params):
+            losses = batched_loss_fn(
+                params, state.apply_fn, batch_inputs, batch_targets)
+            return jnp.mean(losses)
+        grads = jax.grad(loss)(state.params)
+        return state.apply_gradients(grads=grads)
+
+    def _multi_device_train_step(state, batch_inputs, batch_targets):
+        def loss(params):
+            losses = batched_loss_fn(
+                params, state.apply_fn, batch_inputs, batch_targets)
+            return jnp.mean(losses)
+        grads = jax.grad(loss)(state.params)
+        grads = jax.lax.pmean(grads, axis_name='batch')
+        return state.apply_gradients(grads=grads)
+
+    if pmap_enabled:
+        return jax.pmap(_multi_device_train_step, axis_name='batch')
+    else:
+        return jax.jit(_single_device_train_step)
 
 
 def one_hot_encode_action(action_idx, num_actions):
@@ -73,6 +184,8 @@ def load_trajectories(path, agent_order, num_actions):
 
     for episode in data.values():
         steps = list(episode.values())
+        episode_inputs = []
+        episode_targets = []
         for t in range(len(steps) - 1):
             current_step = steps[t]
             next_step = steps[t + 1]
@@ -91,229 +204,163 @@ def load_trajectories(path, agent_order, num_actions):
             for agent in agent_order:
                 target_vec += next_step['joint_observation'][agent]
 
-            inputs.append(input_vec)
-            targets.append(target_vec)
+            episode_inputs += [input_vec]
+            episode_targets += [target_vec]
+
+        inputs += [episode_inputs]
+        targets += [episode_targets]
 
     X = jnp.array(inputs)
     Y = jnp.array(targets)
+
     return X, Y
 
 
-agent_order = ['agent_0', 'agent_1']
-num_actions = 6
-
-X, Y = load_trajectories('trajectories.json', agent_order, num_actions)
-
-output_size = Y.shape[1]
-input_size = X.shape[1]
-
-
-class LSTMCell(nn.Module):
-    hidden_size: int
-
-    @nn.compact
-    def __call__(self, carry, x):
-        lstm_cell = nn.OptimizedLSTMCell()
-        return lstm_cell(carry, x)
-
-
-class LSTMModel(nn.Module):
-    hidden_size: int
-    output_size: int
-    num_layers: int = 1
-
-    @nn.compact
-    def __call__(self, x):
-        batch_size = x.shape[0]
-
-        carry_list = []
-        y = x  # initial input
-
-        rng = jax.random.PRNGKey(0)
-        rngs = jax.random.split(rng, self.num_layers)
-
-        # Building stacked LSTM
-        for layer_idx in range(self.num_layers):
-            lstm_layer = nn.scan(
-                LSTMCell,
-                variable_broadcast="params",
-                split_rngs={"params": False},
-                in_axes=1,
-                out_axes=1
-            )(self.hidden_size)
-
-            carry = nn.OptimizedLSTMCell.initialize_carry(
-                rngs[layer_idx], (batch_size,), self.hidden_size)  # Use different rng for each layer
-
-            carry, y = lstm_layer(carry, y)
-            carry_list.append(carry)
-
-        last_hidden = y[:, -1]
-
-        output = nn.Dense(self.output_size)(last_hidden)
-
-        return output
-
-
-def create_train_state(rng, model, learning_rate, input_shape):
-    params = model.init(rng, jnp.ones(input_shape))['params']
-    tx = optax.adam(learning_rate)
-    return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
-
-
-def single_loss_fn(params, apply_fn, x, y):
-    pred = apply_fn({'params': params}, x)
-    loss = jnp.mean((pred[0] - y) ** 2)
-    return loss
-
-
-batched_loss_fn = jax.vmap(single_loss_fn, in_axes=(None, None, 0, 0))
-
-
-@jax.jit
-def train_step(state, batch):
-    inputs, targets = batch
-    # Compute the loss for every batch of a coup
-    losses = batched_loss_fn(state.params, state.apply_fn, inputs, targets)
-    mean_loss = jnp.mean(losses)
-    grads = jax.grad(lambda params: mean_loss)(state.params)
-    return state.apply_gradients(grads=grads), mean_loss
-
-
-def create_batches(X, Y, batch_size, rng=None):
-    n_samples = X.shape[0]
-    indices = jnp.arange(n_samples)
+def create_batches(X, Y, batch_size, rng=None, n_devices=1):
+    """Splits the full dataset into batches of complete episodes."""
+    n_episodes = X.shape[0]
+    indices = jnp.arange(n_episodes)
     if rng is not None:
-        indices = jax.random.permutation(
-            rng, indices)  # shuffle if rng is given
+        indices = jax.random.permutation(rng, indices)
+
     X = X[indices]
     Y = Y[indices]
 
-    for start_idx in range(0, n_samples, batch_size):
-        end_idx = min(start_idx + batch_size, n_samples)
-        yield X[start_idx:end_idx], Y[start_idx:end_idx]
+    for start_idx in range(0, n_episodes, batch_size):
+        end_idx = min(start_idx + batch_size, n_episodes)
+        batch_X = X[start_idx:end_idx]
+        batch_Y = Y[start_idx:end_idx]
+
+        if n_devices > 1:
+            # reshape batch to [n_devices, batch_per_device, ...]
+            batch_X = batch_X.reshape(
+                (n_devices, batch_X.shape[0] // n_devices) + batch_X.shape[1:])
+            batch_Y = batch_Y.reshape(
+                (n_devices, batch_Y.shape[0] // n_devices) + batch_Y.shape[1:])
+
+        yield batch_X, batch_Y
 
 
-def train_model(state, X, Y, batch_size, num_epochs, rng):
-    total_time = 0.0
-    total_samples = 0
+def build_one_epoch(train_step, batch_size, n_devices):
+    @jax.jit
+    def _one_epoch(state_rng):
+        state, rng = state_rng
+        rng, rng_epoch = jax.random.split(rng)
 
-    for epoch in trange(num_epochs, desc="Training epochs"):
-        start_time = time.time()
-        epoch_rng = jax.random.fold_in(rng, epoch)
+        for batch_X, batch_Y in create_batches(X, Y, batch_size, rng_epoch, n_devices):
+            state = train_step(state, batch_X, batch_Y)
 
-        for batch_X, batch_Y in create_batches(X, Y, batch_size, epoch_rng):
-            state, batch_loss = train_step(state, (batch_X, batch_Y))
-            total_samples += batch_X.shape[0]
+        return state, rng
 
-        epoch_time = time.time() - start_time
-        total_time += epoch_time
-        fps = total_samples / total_time
-
-        print(
-            f"[Epoch {epoch+1}/{num_epochs}] Time: {epoch_time:.2f}s | Samples seen: {total_samples} | Avg FPS: {fps:.2f}")
-
-    print(f"\n✅ Training completed in {total_time:.2f} seconds total.")
-    print(f"✅ Average samples/sec (FPS): {fps:.2f}")
-
-    return state
+    return _one_epoch
 
 
-@jax.pmap
-def train_step_pmap(state, batch):
-    grads = jax.grad(batched_loss_fn)(state.params, state.apply_fn, batch)
-    return state.apply_gradients(grads=grads)
+def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size, trial=None):
+    """Train a model for a few epochs and return validation loss (for HPO)."""
+    n_devices = jax.local_device_count()
+    pmap_enabled = (n_devices > 1)
 
+    # Adjust for batch_size
+    if batch_size % n_devices != 0:
+        batch_size = n_devices * max(1, batch_size // n_devices)
 
-@jax.jit
-def evaluate_model(state, inputs, targets):
-    losses = batched_loss_fn(state.params, state.apply_fn, inputs, targets)
-    return jnp.mean(losses)
-
-
-def batched_evaluate_model(state, inputs, targets, batch_size):
-    total_loss = 0.0
-    total_samples = 0
-
-    for batch_inputs, batch_targets in create_batches(inputs, targets, batch_size):
-        loss = evaluate_model(state, batch_inputs, batch_targets)
-        total_loss += loss * batch_inputs.shape[0]
-        total_samples += batch_inputs.shape[0]
-
-    avg_loss = total_loss / total_samples
-    return avg_loss
-
-
-def objective(trial):
-    # 1. Suggérer des hyperparamètres
-    hidden_size = trial.suggest_int(
-        'hidden_size', intervals["hidden_size"][0], intervals["hidden_size"][1])
-    learning_rate = trial.suggest_loguniform(
-        'learning_rate', intervals["learning_rate"][0], intervals["learning_rate"][1])
-    num_epochs = trial.suggest_int(
-        'num_epochs', intervals["num_epochs"][0], intervals["num_epochs"][1])
-    num_layers = trial.suggest_int(
-        'num_layers', intervals["num_layers"][0], intervals["num_layers"][1])
-    batch_size = trial.suggest_int(
-        'batch_size', intervals["batch_size"][0], intervals["batch_size"][1])
-
-    # 2. Initialize model and state
-    model = LSTMModel(hidden_size=hidden_size,
-                      output_size=output_size, num_layers=num_layers)
+    model = SimpleLSTM(hidden_size=hidden_size,
+                       output_size=Y.shape[2], num_layers=num_layers)
     rng = jax.random.PRNGKey(0)
+    rng, rng_init = jax.random.split(rng)
+
     state = create_train_state(
-        rng, model, learning_rate, (X_seq.shape[0], 1, X_seq.shape[2]))
+        rng_init, model, learning_rate, (batch_size, X.shape[1], X.shape[2]))
 
-    # 3. Train
-    state = train_model(state, X_seq, Y, batch_size, num_epochs, rng)
+    if pmap_enabled:
+        state = jax_utils.replicate(state)
 
-    # 4. Evaluate
-    eval_loss = batched_evaluate_model(state, X_seq, Y, batch_size)
+    train_step = build_train_step(pmap_enabled)
 
-    return float(eval_loss)
+    num_epochs = 3
+
+    def one_epoch(state_rng):
+        state, rng = state_rng
+        rng, rng_epoch = jax.random.split(rng)
+
+        for batch_X, batch_Y in create_batches(X, Y, batch_size, rng_epoch, n_devices):
+            state = train_step(state, batch_X, batch_Y)
+
+        return state, rng
+
+    rng = jax.random.PRNGKey(42)
+
+    for epoch in range(num_epochs):
+        # 1 epoch training
+        state, rng = one_epoch((state, rng))
+
+        # Intermediate evaluation after this epoch
+        params = jax_utils.unreplicate(
+            state).params if pmap_enabled else state.params
+        preds = model.apply({'params': params}, X)
+        current_loss = jnp.mean((preds - Y) ** 2)
+
+        # Report intermediate value to Optuna
+        if trial is not None:
+            trial.report(float(current_loss), step=epoch)
+
+            # Check if trial should be pruned
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
+    # Final evaluation
+    params = jax_utils.unreplicate(
+        state).params if pmap_enabled else state.params
+    preds = model.apply({'params': params}, X)
+    final_loss = jnp.mean((preds - Y) ** 2)
+
+    return float(final_loss)  # Optuna excepts a float
 
 
-if __name__ == '__main__':
+def run_hpo(X, Y, n_trials=30):
 
-    # 1 - Run HPO
+    hardware_info = get_hardware_info()
+    search_space = get_hyperparameter_search_space(hardware_info)
 
-    # Adapter X pour simuler une séquence de longueur 1 :
-    X_seq = X[:, None, :]  # (batch_size, 1, input_dim)
+    def objective(trial):
+        hidden_size = trial.suggest_int(
+            'hidden_size', *search_space['hidden_size'])
+        num_layers = trial.suggest_int(
+            'num_layers', *search_space['num_layers'])
+        learning_rate = trial.suggest_loguniform(
+            'learning_rate', *search_space['learning_rate'])
+        batch_size = trial.suggest_categorical('batch_size',
+                                               [search_space['batch_size'][0],
+                                                (search_space['batch_size'][0] +
+                                                   search_space['batch_size'][1]) // 2,
+                                                   search_space['batch_size'][1]]
+                                               )
 
-    # Lancer l'optimisation
-    study = optuna.create_study(direction='minimize')
-    study.optimize(objective, n_trials=2, show_progress_bar=True)
+        # Pass the trial for pruning
+        loss = train_one_model(X, Y, hidden_size, num_layers,
+                               learning_rate, batch_size, trial=trial)
 
-    print("Best hyperparameters found:")
-    print(study.best_params)
-    print(f"Best evaluation loss: {study.best_value}")
+        return loss
 
-    # 2 - Create the model with best hyperparameters for further training
+    study = optuna.create_study(
+        direction="minimize", pruner=optuna.pruners.MedianPruner())
+    study.optimize(objective, n_trials=n_trials)
 
-    model = LSTMModel(
-        hidden_size=study.best_params["hidden_size"], output_size=output_size, num_layers=study.best_params["num_layers"])
+    print("✅ Best trial:")
+    print(study.best_trial.params)
 
-    rng = jax.random.PRNGKey(0)
-    # batch_size, input_dim
-    state = create_train_state(
-        rng, model, study.best_params["learning_rate"], (1, X.shape[0], X.shape[1]))
+    return study
 
-    state = train_model(
-        state, X_seq, Y, study.best_params["batch_size"], study.best_params["num_epochs"], rng)
 
-    save_dict = {
-        "params": state.params,
-        "model_hyperparams": {
-            "hidden_size": study.best_params["hidden_size"],
-            "output_size": output_size,
-            "num_layers": study.best_params["num_layers"]
-        }
-    }
-    with open('trained_model.pkl', 'wb') as f:
-        pickle.dump(save_dict, f)
+# Training loop
+if __name__ == "__main__":
 
-    # Evaluate the model
-    eval_loss = batched_evaluate_model(
-        state, X_seq, Y, study.best_params["batch_size"])
+    agent_order = ['agent_0', 'agent_1']
+    num_actions = 6
 
-    print(f"Evaluation Loss on training set: {eval_loss:.6f}")
+    X, Y = load_trajectories('trajectories.json', agent_order, num_actions)
+
+    results = run_hpo(X, Y, n_trials=5)
+
+    print(results.best_value)
+    print(results.best_params)
