@@ -259,7 +259,7 @@ def build_one_epoch(train_step, batch_size, n_devices):
     return _one_epoch
 
 
-def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size, num_epochs, trial=None):
+def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size, num_epochs, trial=None, save_model=False):
     """Train a model for a few epochs and return validation loss (for HPO)."""
     n_devices = jax.local_device_count()
     pmap_enabled = (n_devices > 1)
@@ -316,6 +316,19 @@ def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size, nu
     preds = model.apply({'params': params}, X)
     final_loss = jnp.mean((preds - Y) ** 2)
 
+    if save_model:
+        save_dict = {
+            "params": state.params,
+            "model_hyperparams": {
+                "input_size": X.shape[2],
+                "hidden_size": hidden_size,
+                "output_size": Y.shape[2],
+                "num_layers": num_layers
+            }
+        }
+        with open('trained_model.pkl', 'wb') as f:
+            pickle.dump(save_dict, f)
+
     return float(final_loss)  # Optuna excepts a float
 
 
@@ -364,17 +377,24 @@ if __name__ == "__main__":
 
     X, Y = load_trajectories('trajectories.json', agent_order, num_actions)
 
-    results = run_hpo(X, Y, n_trials=50, custom_intervals={"num_epochs": (100,100)})
+    # results = run_hpo(X, Y, n_trials=100, custom_intervals={
+    #                   "num_epochs": (1000, 1000)})
 
-    print(results.best_value)
-    print(results.best_params)
+    # print(results.best_value)
+    # print(results.best_params)
 
-    # Plot graphs
-    param_importances_graph = vis.plot_param_importances(results)
-    optimization_history_graph = vis.plot_optimization_history(results)
+    # # Plot graphs
+    # param_importances_graph = vis.plot_param_importances(results)
+    # optimization_history_graph = vis.plot_optimization_history(results)
 
-    # Save graphs
-    param_importances_graph.write_image("hyperparameter_importance.png")
-    optimization_history_graph.write_image("optimization_history.png")
+    # # Save graphs
+    # param_importances_graph.write_image("hyperparameter_importance.png")
+    # optimization_history_graph.write_image("optimization_history.png")
 
-    print("✅ HPO Importances Graphs saved as PNG file.")
+    # print("✅ HPO Importances Graphs saved as PNG file.")
+
+    # {'hidden_size': 475, 'num_layers': 2, 'learning_rate': 0.00822465146199599, 'batch_size': 4, 'num_epochs': 1000}
+
+    final_loss = train_one_model(
+        X, Y, 475, 2, 0.00822465146199599, 4, 1000, save_model=True)
+    print(f"Final loss: {final_loss}")

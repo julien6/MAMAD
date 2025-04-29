@@ -12,7 +12,7 @@ from sklearn.decomposition import PCA
 from matplotlib.lines import Line2D
 from prepare_data import infer_metadata_from_json, one_hot_encode_action
 from flax import linen as nn
-from jax_train import LSTMModel
+from jax_train import SimpleLSTM
 from collect import load_episode_step_data
 
 
@@ -26,7 +26,7 @@ class ODF_LSTM_Runner_JAX:
         self.model_hyperparams = checkpoint["model_hyperparams"]
         self.metadata = infer_metadata_from_json(trajectories_path)
 
-        self.model = LSTMModel(
+        self.model = SimpleLSTM(
             hidden_size=self.model_hyperparams["hidden_size"],
             output_size=self.metadata["obs_dim_per_agent"] *
             len(self.metadata["agent_order"]),
