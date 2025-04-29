@@ -16,6 +16,13 @@ from jax_train import SimpleLSTM
 from collect import load_episode_step_data
 
 
+def flatten_obs_dict(obs_dict: Dict[str, List]) -> np.ndarray:
+    return np.concatenate([
+        np.asarray(obs_dict[agent]).ravel()
+        for agent in sorted(obs_dict.keys())
+    ])
+
+
 class ODF_LSTM_Runner_JAX:
     def __init__(self, model_path: str, trajectories_path: str):
 
@@ -63,7 +70,7 @@ class ODF_LSTM_Runner_JAX:
         result = {}
         idx = 0
         for agent in agent_order:
-            result[agent] = pred[idx:idx + obs_dim].tolist()
+            result[agent] = pred[idx:idx + obs_dim].squeeze().tolist()
             idx += obs_dim
 
         return result
@@ -74,7 +81,9 @@ def transition_to_vector(joint_obs: Dict[str, List[float]],
                          next_joint_obs: Dict[str, List[float]],
                          agent_order: List[str],
                          num_actions: int) -> np.ndarray:
-    obs = np.concatenate([np.array(joint_obs[agent]) for agent in agent_order])
+    obs = flatten_obs_dict(joint_obs)
+    # obs = np.concatenate([np.array(joint_obs[agent]).ravel()
+    #                      for agent in agent_order])
 
     act = np.array([])
     for agent in agent_order:
@@ -85,8 +94,9 @@ def transition_to_vector(joint_obs: Dict[str, List[float]],
             act = np.concatenate([act, np.array([0.0] * num_actions)])
     act = np.array(act)
 
-    next_obs = np.concatenate([np.array(next_joint_obs[agent])
-                              for agent in agent_order])
+    # next_obs = np.concatenate(
+    #     [np.array(next_joint_obs[agent]).ravel() for agent in agent_order])
+    next_obs = flatten_obs_dict(next_joint_obs)
 
     return np.concatenate([obs, act, next_obs])
 
@@ -222,7 +232,7 @@ if __name__ == '__main__':
     model_path = "trained_model.pkl"
     trajectories_path = "trajectories.json"
     runner = ODF_LSTM_Runner_JAX(model_path, trajectories_path)
-    ep_idx = 0
+    ep_idx = 1
     print(f"▶️  Selected trajectory: episode {ep_idx}")
 
     exact_traj, pred_traj = generate_exact_and_predicted_trajectories(
