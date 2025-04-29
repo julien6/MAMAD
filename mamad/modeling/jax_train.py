@@ -57,6 +57,7 @@ def get_hyperparameter_search_space(hardware_info):
     search_space["learning_rate"] = (1e-4, 1e-2)  # classic interval for Adam
     search_space["batch_size"] = (
         hardware_info["num_devices"], hardware_info["num_devices"]*8)
+    search_space["num_epochs"] = (20, 100)
 
     return search_space
 
@@ -258,7 +259,7 @@ def build_one_epoch(train_step, batch_size, n_devices):
     return _one_epoch
 
 
-def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size, trial=None):
+def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size, num_epochs, trial=None):
     """Train a model for a few epochs and return validation loss (for HPO)."""
     n_devices = jax.local_device_count()
     pmap_enabled = (n_devices > 1)
@@ -279,8 +280,6 @@ def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size, tr
         state = jax_utils.replicate(state)
 
     train_step = build_train_step(pmap_enabled)
-
-    num_epochs = 3
 
     def one_epoch(state_rng):
         state, rng = state_rng
@@ -339,10 +338,11 @@ def run_hpo(X, Y, n_trials=30, custom_intervals: dict = None):
                                                    search_space['batch_size'][1]) // 2,
                                                    search_space['batch_size'][1]]
                                                )
-
+        num_epochs = trial.suggest_int(
+            'num_epochs', *search_space['num_epochs'])
         # Pass the trial for pruning
         loss = train_one_model(X, Y, hidden_size, num_layers,
-                               learning_rate, batch_size, trial=trial)
+                               learning_rate, batch_size, num_epochs, trial=trial)
 
         return loss
 
@@ -364,8 +364,7 @@ if __name__ == "__main__":
 
     X, Y = load_trajectories('trajectories.json', agent_order, num_actions)
 
-    results = run_hpo(X, Y, n_trials=5, custom_intervals={
-                      "num_layers": (3, 3)})
+    results = run_hpo(X, Y, n_trials=50, custom_intervals={"num_epochs": (100,100)})
 
     print(results.best_value)
     print(results.best_params)
