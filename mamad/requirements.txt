@@ -14,3 +14,5 @@ flax==0.6.9
 optax==0.1.7
 tqdm
 pynvml
+plotly
+kaleido

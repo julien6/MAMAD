@@ -1,11 +1,14 @@
 import json
 import pickle
+from typing import Dict
 import jax
 import jax.numpy as jnp
 import optax
 import jax
 import psutil
 import optuna
+import optuna.visualization as vis
+import matplotlib.pyplot as plt
 
 from flax import linen as nn
 from flax.training import train_state
@@ -317,10 +320,11 @@ def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size, tr
     return float(final_loss)  # Optuna excepts a float
 
 
-def run_hpo(X, Y, n_trials=30):
+def run_hpo(X, Y, n_trials=30, custom_intervals: dict = None):
 
     hardware_info = get_hardware_info()
     search_space = get_hyperparameter_search_space(hardware_info)
+    search_space.update(custom_intervals)
 
     def objective(trial):
         hidden_size = trial.suggest_int(
@@ -360,7 +364,18 @@ if __name__ == "__main__":
 
     X, Y = load_trajectories('trajectories.json', agent_order, num_actions)
 
-    results = run_hpo(X, Y, n_trials=5)
+    results = run_hpo(X, Y, n_trials=5, custom_intervals={
+                      "num_layers": (3, 3)})
 
     print(results.best_value)
     print(results.best_params)
+
+    # Plot graphs
+    param_importances_graph = vis.plot_param_importances(results)
+    optimization_history_graph = vis.plot_optimization_history(results)
+
+    # Save graphs
+    param_importances_graph.write_image("hyperparameter_importance.png")
+    optimization_history_graph.write_image("optimization_history.png")
+
+    print("✅ HPO Importances Graphs saved as PNG file.")
