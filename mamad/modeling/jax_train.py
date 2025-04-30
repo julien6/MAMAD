@@ -61,6 +61,33 @@ def get_hyperparameter_search_space(hardware_info):
 
     return search_space
 
+
+def stepwise_loss_fn(params, model, inputs, targets):
+    def step_fn(carry, input_target):
+        x_t, y_t = input_target
+        x_t = x_t[None, None, :]  # shape (1, 1, input_dim)
+        y_pred, carry = model.apply({'params': params}, x_t, carry=carry)
+        loss = jnp.mean((y_pred[0, 0] - y_t) ** 2)
+        return carry, loss
+
+    carry = [
+        nn.OptimizedLSTMCell.initialize_carry(
+            jax.random.PRNGKey(i), (1,), model.hidden_size
+        ) for i in range(model.num_layers)
+    ]
+
+    _, losses = jax.lax.scan(step_fn, carry, (inputs, targets))
+    return jnp.mean(losses)
+
+
+def evaluate_stepwise_loss(params, model, X, Y):
+    batched_stepwise_loss = jax.vmap(
+        lambda x, y: stepwise_loss_fn(params, model, x, y),
+        in_axes=(0, 0)
+    )
+    losses = batched_stepwise_loss(X, Y)
+    return jnp.mean(losses)
+
 # Simple LSTM model definition
 
 
@@ -97,21 +124,18 @@ class SimpleLSTM(nn.Module):
         self.dense = nn.Dense(self.output_size)
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, carry=None):
         batch_size = x.shape[0]
-
-        # Initialize carry for each layer
-        carry = [
-            nn.OptimizedLSTMCell.initialize_carry(
-                jax.random.PRNGKey(i), (batch_size,), self.hidden_size
-            )
-            for i in range(self.num_layers)
-        ]
-
+        if carry is None:
+            carry = [
+                nn.OptimizedLSTMCell.initialize_carry(
+                    jax.random.PRNGKey(i), (batch_size,), self.hidden_size
+                )
+                for i in range(self.num_layers)
+            ]
         carry, y = self.stacked_lstm(carry, x)
         preds = self.dense(y)
-        return preds
-
+        return preds, carry
 
 # Create a train state
 
@@ -137,32 +161,38 @@ def create_train_state(rng, model, learning_rate, input_shape):
 # Loss function comparing prediction to target at every timestep
 
 
-def single_loss_fn(params, apply_fn, input_sample, target_sample):
-    # [None, ...] to fake batch axis
-    preds = apply_fn({'params': params}, input_sample[None, ...])
-    preds = preds[0]  # remove fake batch axis
-    loss = jnp.mean((preds - target_sample) ** 2)
-    return loss
-
-
-batched_loss_fn = jax.vmap(single_loss_fn, in_axes=(None, None, 0, 0))
-
+jit_stepwise_loss_fn = jax.jit(stepwise_loss_fn, static_argnames=["model"])
 
 # Single training step
-def build_train_step(pmap_enabled):
+
+
+def build_train_step(pmap_enabled, model):
+
     def _single_device_train_step(state, batch_inputs, batch_targets):
+
         def loss(params):
-            losses = batched_loss_fn(
-                params, state.apply_fn, batch_inputs, batch_targets)
-            return jnp.mean(losses)
+            losses = []
+            for ep in range(batch_inputs.shape[0]):
+                loss = jit_stepwise_loss_fn(params, model,
+                                            batch_inputs[ep],
+                                            batch_targets[ep])
+                losses.append(loss)
+            return jnp.mean(jnp.array(losses))
+
         grads = jax.grad(loss)(state.params)
         return state.apply_gradients(grads=grads)
 
     def _multi_device_train_step(state, batch_inputs, batch_targets):
+
         def loss(params):
-            losses = batched_loss_fn(
-                params, state.apply_fn, batch_inputs, batch_targets)
-            return jnp.mean(losses)
+            losses = []
+            for ep in range(batch_inputs.shape[0]):
+                loss = jit_stepwise_loss_fn(params, model,
+                                            batch_inputs[ep],
+                                            batch_targets[ep])
+                losses.append(loss)
+            return jnp.mean(jnp.array(losses))
+
         grads = jax.grad(loss)(state.params)
         grads = jax.lax.pmean(grads, axis_name='batch')
         return state.apply_gradients(grads=grads)
@@ -279,7 +309,7 @@ def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size, nu
     if pmap_enabled:
         state = jax_utils.replicate(state)
 
-    train_step = build_train_step(pmap_enabled)
+    train_step = build_train_step(pmap_enabled, model)
 
     def one_epoch(state_rng):
         state, rng = state_rng
@@ -299,8 +329,7 @@ def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size, nu
         # Intermediate evaluation after this epoch
         params = jax_utils.unreplicate(
             state).params if pmap_enabled else state.params
-        preds = model.apply({'params': params}, X)
-        current_loss = jnp.mean((preds - Y) ** 2)
+        current_loss = evaluate_stepwise_loss(params, model, X, Y)
 
         # Report intermediate value to Optuna
         if trial is not None:
@@ -313,8 +342,7 @@ def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size, nu
     # Final evaluation
     params = jax_utils.unreplicate(
         state).params if pmap_enabled else state.params
-    preds = model.apply({'params': params}, X)
-    final_loss = jnp.mean((preds - Y) ** 2)
+    final_loss = evaluate_stepwise_loss(params, model, X, Y)
 
     if save_model:
         save_dict = {
@@ -396,5 +424,5 @@ if __name__ == "__main__":
     # {'hidden_size': 475, 'num_layers': 2, 'learning_rate': 0.00822465146199599, 'batch_size': 4, 'num_epochs': 1000}
 
     final_loss = train_one_model(
-        X, Y, 475, 2, 0.00822465146199599, 4, 1000, save_model=True)
+        X, Y, 500, 3, 0.00822465146199599, 1, 1000, save_model=True)
     print(f"Final loss: {final_loss}")

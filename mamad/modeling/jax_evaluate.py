@@ -32,6 +32,7 @@ class ODF_LSTM_Runner_JAX:
         self.params = checkpoint["params"]
         self.model_hyperparams = checkpoint["model_hyperparams"]
         self.metadata = infer_metadata_from_json(trajectories_path)
+        self.carry = None  # To store recurrent state
 
         self.model = SimpleLSTM(
             hidden_size=self.model_hyperparams["hidden_size"],
@@ -58,11 +59,21 @@ class ODF_LSTM_Runner_JAX:
 
         input_vec = np.concatenate([obs_vec, act_vec])
         input_vec = jnp.array(input_vec)
-        # (batch_size=1, seq_len=1, input_dim)
-        input_vec = input_vec[None, None, :]
 
-        pred = self.model.apply({'params': self.params}, input_vec)
-        pred = np.array(pred)[0]  # remove batch dimension
+        # (batch_size=1, seq_len=1, input_dim)
+        # shape (1, 1, input_dim)
+        input_vec = jnp.array(input_vec)[None, None, :]
+
+        # Initialize carry if None
+        if self.carry is None:
+            self.carry = [
+                nn.OptimizedLSTMCell.initialize_carry(
+                    jax.random.PRNGKey(i), (1,), self.model.hidden_size
+                ) for i in range(self.model.num_layers)
+            ]
+
+        pred, self.carry = self.model.apply(
+            {'params': self.params}, input_vec, carry=self.carry)
 
         # Split predicted vector back into agents
         obs_dim = self.metadata["obs_dim_per_agent"]
@@ -108,6 +119,7 @@ def generate_exact_and_predicted_trajectories(file_path: str, ep_idx: int,
                                               num_actions: int):
     exact_trajectory = []
     predicted_trajectory = []
+    odf_runner.carry = None
 
     # Initial step
     step = load_episode_step_data(file_path, ep_idx, 0)
@@ -232,7 +244,7 @@ if __name__ == '__main__':
     model_path = "trained_model.pkl"
     trajectories_path = "trajectories.json"
     runner = ODF_LSTM_Runner_JAX(model_path, trajectories_path)
-    ep_idx = 1
+    ep_idx = 0
     print(f"▶️  Selected trajectory: episode {ep_idx}")
 
     exact_traj, pred_traj = generate_exact_and_predicted_trajectories(
