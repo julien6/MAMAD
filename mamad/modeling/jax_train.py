@@ -289,7 +289,7 @@ def build_one_epoch(train_step, batch_size, n_devices):
     return _one_epoch
 
 
-def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size, num_epochs, trial=None, save_model=False):
+def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size, num_epochs, trial=None, save_model=False, target_loss=None):
     """Train a model for a few epochs and return validation loss (for HPO)."""
     n_devices = jax.local_device_count()
     pmap_enabled = (n_devices > 1)
@@ -331,6 +331,10 @@ def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size, nu
             state).params if pmap_enabled else state.params
         current_loss = evaluate_stepwise_loss(params, model, X, Y)
 
+        if target_loss is not None and current_loss < target_loss:
+            print(f"🎯 Target loss reached at epoch {epoch}: {current_loss}")
+            break
+
         # Report intermediate value to Optuna
         if trial is not None:
             trial.report(float(current_loss), step=epoch)
@@ -360,7 +364,7 @@ def train_one_model(X, Y, hidden_size, num_layers, learning_rate, batch_size, nu
     return float(final_loss)  # Optuna excepts a float
 
 
-def run_hpo(X, Y, n_trials=30, custom_intervals: dict = None):
+def run_hpo(X, Y, n_trials=30, custom_intervals: dict = None, target_loss=None, max_epochs=None):
 
     hardware_info = get_hardware_info()
     search_space = get_hyperparameter_search_space(hardware_info)
@@ -383,7 +387,7 @@ def run_hpo(X, Y, n_trials=30, custom_intervals: dict = None):
             'num_epochs', *search_space['num_epochs'])
         # Pass the trial for pruning
         loss = train_one_model(X, Y, hidden_size, num_layers,
-                               learning_rate, batch_size, num_epochs, trial=trial)
+                               learning_rate, batch_size, num_epochs, trial=trial, target_loss=target_loss)
 
         return loss
 
@@ -424,5 +428,5 @@ if __name__ == "__main__":
     # {'hidden_size': 475, 'num_layers': 2, 'learning_rate': 0.00822465146199599, 'batch_size': 4, 'num_epochs': 1000}
 
     final_loss = train_one_model(
-        X, Y, 500, 3, 0.00822465146199599, 1, 1000, save_model=True)
+        X, Y, 500, 3, 0.00822465146199599, 1, 1000, save_model=True, target_loss=1.2e-10)
     print(f"Final loss: {final_loss}")
