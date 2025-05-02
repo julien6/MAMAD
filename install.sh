@@ -50,6 +50,12 @@ cd overcooked_ai
 pip install -e .
 cd ..
 
+# Install OMARLE environments
+git clone https://github.com/julien6/OMARLE.git
+cd OMARLE
+pip install -e .
+cd ..
+
 cd mamad/
 
 pip install -r requirements.txt

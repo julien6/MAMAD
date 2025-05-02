@@ -4,14 +4,6 @@ import pygame
 import pickle
 import os
 import random
-
-from gym.spaces import Dict as GymDict, Discrete, Box
-from overcooked_ai_py.mdp.overcooked_mdp import OvercookedGridworld
-from overcooked_ai_py.mdp.overcooked_env import OvercookedEnv
-from overcooked_ai_py.agents.agent import Agent, RandomAgent
-from tqdm import trange
-
-
 import os
 import gym
 import random
@@ -23,6 +15,11 @@ import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
 
+from gym.spaces import Dict as GymDict, Discrete, Box
+from overcooked_ai_py.mdp.overcooked_mdp import OvercookedGridworld
+from overcooked_ai_py.mdp.overcooked_env import OvercookedEnv
+from overcooked_ai_py.agents.agent import Agent, RandomAgent
+from tqdm import trange
 from typing import Any, Dict, List, Tuple, Union
 from pettingzoo.butterfly import pistonball_v4
 from PIL import Image
@@ -35,8 +32,9 @@ from math import log10
 from torch.utils.data import DataLoader, TensorDataset
 from overcooked_ai_py.mdp.overcooked_mdp import OvercookedGridworld
 from overcooked_ai_py.mdp.overcooked_env import OvercookedEnv
+from omarle.warehouse_management.warehouse_management_v0 import parallel_env as wm_env
 
-# Une trajectoire ("Trajectory") est une liste de couples (observations, joint_action) où chaque élément est un dictionnaire {agent: List}
+
 Trajectory = Dict[str, Dict[str, Dict[str, List]]]
 
 Trajectories = Dict[str, Trajectory]
@@ -66,7 +64,7 @@ class ActionSampler:
         raise NotImplementedError()
 
 
-def collect_trajectories(env, action_sampler: ActionSampler = None, num_episodes=100, max_steps=100, file_path="trajectories.json"):
+def collect_trajectories(env, action_sampler: ActionSampler = None, num_episodes=100, max_steps=1000, file_path="trajectories.json", max_categorical_observation: int = None):
     """
     Collects and saves trajectories from the Pistonball environment in an incremental JSON file.
     A trajectory is a list of pairs (observations, joint_action) where each element
@@ -120,15 +118,27 @@ def collect_trajectories(env, action_sampler: ActionSampler = None, num_episodes
                     joint_action = {agent: joint_action[index]
                                     for index, agent in enumerate(agents)}
 
+                if type(list(joint_obs.values())[0]) == np.ndarray:
+                    joint_obs = {agent: obs.tolist()
+                                 for agent, obs in joint_obs.items()}
+
+                if max_categorical_observation is not None:
+                    joint_obs = {
+                        agent: np.concatenate([np.eye(max_categorical_observation, max_categorical_observation)[cell] for cell in obs]).tolist() for agent, obs in joint_obs.items()
+                    }
+
                 trajectory_step = {
                     "joint_observation": joint_obs, "joint_action": joint_action}
 
                 # Écrire la trajectoire de l'épisode dans le fichier
                 f.write(f'"step_{str(step)}": {json.dumps(trajectory_step)}')
-                if step < max_steps - 1:
+                if (step < max_steps - 1) and not list(dones.values())[0]:
                     f.write(',\n')  # Séparer chaque step par une virgule
 
                 joint_obs = next_joint_obs
+
+                if list(dones.values())[0]:
+                    break
 
             if episode < num_episodes - 1:
                 f.write('},\n')  # Séparer chaque épisode par une virgule
@@ -199,16 +209,29 @@ if __name__ == '__main__':
         def sample(self, observations: Any):
             return [random.randint(0, 5), random.randint(0, 5)]
 
+    class WMActionSampler(ActionSampler):
+
+        def __init__(self) -> None:
+            super().__init__()
+
+        def sample(self, observations: Any):
+            return {"agent_0": random.randint(0, 6), "agent_1": random.randint(0, 6), "agent_2": random.randint(0, 6)}
+
     # Step 1.1 - Initialize the Overcooked-AI environment
-    layout_mdp = OvercookedGridworld.from_layout_name("asymmetric_advantages")
-    core_env = OvercookedEnv.from_mdp(layout_mdp, horizon=400)
-    config = {'base_env': core_env,
-              'featurize_fn': core_env.featurize_state_mdp}
-    env = gym.make('Overcooked-v0', **config)
+    # layout_mdp = OvercookedGridworld.from_layout_name("asymmetric_advantages")
+    # core_env = OvercookedEnv.from_mdp(layout_mdp, horizon=400)
+    # config = {'base_env': core_env,
+    #           'featurize_fn': core_env.featurize_state_mdp}
+    # env = gym.make('Overcooked-v0', **config)
+
+    # Step 1.1 - Initialize the Warehouse Management environment
+    env = wm_env()
 
     output_file_path = collect_trajectories(
-        env, num_episodes=2, max_steps=3, action_sampler=OvercookedActionSampler())
+        env, num_episodes=1000, action_sampler=WMActionSampler())  # , max_categorical_observation=14)
 
     # output_file_path = "trajectories.json"
 
-    print(load_episode_step_data(output_file_path, 0, 0)["joint_action"])
+    from prepare_data import infer_metadata_from_json
+
+    print(infer_metadata_from_json(output_file_path))

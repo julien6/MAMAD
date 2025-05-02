@@ -211,15 +211,15 @@ def plot_observations_PCA(exact_traj, predicted_traj, obs_dim: int, agent_count:
 
     plt.figure(figsize=(14, 8))
     for i in range(n_obs):
-        plt.scatter(X_2d[i, 0], X_2d[i, 1], color='blue')
-        plt.text(X_2d[i, 0], X_2d[i, 1], str(i), fontsize=10, color='blue')
+        plt.scatter(X_2d[i, 0] + 1e-2, X_2d[i, 1], color='blue')
+        plt.text(X_2d[i, 0] + 1e-2, X_2d[i, 1], str(i), fontsize=10, color='blue')
     for i in range(len(pred_obs)):
         j = n_obs + i
         plt.scatter(X_2d[j, 0], X_2d[j, 1], color='orange')
         plt.text(X_2d[j, 0], X_2d[j, 1], str(i), fontsize=10, color='orange')
 
     for i in range(0, len(exact_obs) - 1):
-        plt.plot(X_2d[i:i+2, 0], X_2d[i:i+2, 1],
+        plt.plot(X_2d[i:i+2, 0] + 1e-2, X_2d[i:i+2, 1],
                  color='blue', linestyle='--', linewidth=0.5)
     for i in range(n_obs, len(X_2d) - 1):
         plt.plot(X_2d[i:i+2, 0], X_2d[i:i+2, 1],
